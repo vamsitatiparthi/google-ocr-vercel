@@ -13,6 +13,8 @@
     "next": "^14.2.4",
     "pdf-parse": "^1.1.1",
     "formidable": "^3.5.1",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.7.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }
