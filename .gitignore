@@ -1,0 +1,9 @@
+﻿# dependencies
+node_modules/
+# builds
+.next/
+out/
+# env and secrets
+.env.local
+.env
+service-account.json

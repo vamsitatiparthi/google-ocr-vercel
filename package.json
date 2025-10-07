@@ -1,0 +1,19 @@
+{
+  "name": "google-ocr-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@google-cloud/vision": "^3.3.0",
+    "next": "^14.2.4",
+    "pdf-parse": "^1.1.1",
+    "formidable": "^3.5.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
