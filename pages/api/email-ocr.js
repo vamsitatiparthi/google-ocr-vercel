@@ -57,6 +57,33 @@ async function ocrBuffer(client, buf, filename) {
   return { type: 'unknown', text: '' };
 }
 
+function baseName(name = '') {
+  const i = name.lastIndexOf('.');
+  return i >= 0 ? name.slice(0, i) : name;
+}
+
+function csvPreviewJson(csvText) {
+  try {
+    const lines = csvText.split(/\r?\n/).filter(l => l.length > 0);
+    if (lines.length === 0) return { headers: [], rows: [] };
+    const split = (line) => line.split(',');
+    const headers = split(lines[0]).map(h => h.trim());
+    const rows = [];
+    for (let i = 1; i < Math.min(lines.length, 2001); i++) {
+      const cols = split(lines[i]).map(c => c.trim());
+      const obj = {};
+      for (let j = 0; j < cols.length; j++) {
+        const key = headers[j] || `col_${j+1}`;
+        obj[key] = cols[j];
+      }
+      rows.push(obj);
+    }
+    return { headers, row_count: lines.length - 1, rows_preview_count: rows.length, rows };
+  } catch {
+    return { headers: [], rows: [] };
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method not allowed');
 
@@ -121,13 +148,31 @@ export default async function handler(req, res) {
         const filename = att.filename || 'attachment';
         const content = att.content; // Buffer
         try {
+          // Always emit the original as a list item (no content to preview)
+          results.push({ filename, type: 'Original', text: '' });
+
           const { type, text } = await ocrBuffer(visionClient, content, filename);
-          results.push({ filename, type, text });
+
+          // Emit extracted text as a generated file name
+          const nameBase = baseName(filename);
+          const extractedName = `${nameBase}_extracted.txt`;
+          if (text && text.length > 0) {
+            results.push({ filename: extractedName, type, text });
+          } else {
+            results.push({ filename: extractedName, type, text: '' });
+          }
+
+          // For CSV, also emit parsed JSON preview
+          if (isCsv(filename)) {
+            const parsed = csvPreviewJson(text || content.toString('utf-8'));
+            const jsonName = `${nameBase}_parsed.json`;
+            results.push({ filename: jsonName, type: 'csv-parsed', text: JSON.stringify(parsed) });
+          }
         } catch (e) {
           results.push({ filename, error: e.message || 'Failed to process attachment' });
         }
         // Keep total results reasonable
-        if (results.length >= 20) break;
+        if (results.length >= 40) break; // allow more since we emit multiple per attachment
       }
       if (results.length >= 20) break;
     }

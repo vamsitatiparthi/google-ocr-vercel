@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 export default function Home() {
   const [files, setFiles] = useState([]);
   const [results, setResults] = useState([]);
+  const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   // Email processing state
@@ -34,6 +35,7 @@ export default function Home() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setResults(data.results || []);
+      setSelected(0);
     } catch (e) {
       setError(e.message || 'Email processing failed');
     } finally {
@@ -105,27 +107,122 @@ export default function Home() {
             {error && <div style={{ color: '#ff8080' }}>{error}</div>}
           </div>
 
-          <div style={{ flex: 1, background: '#111a2c', padding: 16, borderRadius: 8 }}>
+          <div style={{ flex: 1, background: '#111a2c', padding: 16, borderRadius: 8, minHeight: 520 }}>
             <h3 style={{ marginTop: 0 }}>Results</h3>
             {results.length === 0 && <div style={{ opacity: 0.7 }}>No results yet.</div>}
-            {results.map((r, idx) => (
-              <div key={idx} style={{ background: '#0e1729', padding: 12, borderRadius: 8, marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <strong>{r.filename}</strong>
-                  <span style={{ opacity: 0.8 }}>{r.type}</span>
+
+            {results.length > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 16 }}>
+                <div style={{ background: '#0e1729', borderRadius: 8, padding: 8, overflow: 'auto', maxHeight: 560 }}>
+                  {results.map((r, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => setSelected(idx)}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        border: 'none',
+                        background: idx === selected ? '#1a2340' : 'transparent',
+                        color: '#e6eefc',
+                        padding: '10px 12px',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                        marginBottom: 6
+                      }}
+                      title={r.filename}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.filename}</span>
+                        <span style={{ opacity: 0.7, fontSize: 12 }}>{r.type || (r.error ? 'error' : '')}</span>
+                      </div>
+                      {r.error && <div style={{ color: '#ff8080', fontSize: 12 }}>{r.error}</div>}
+                    </button>
+                  ))}
                 </div>
-                {r.error ? (
-                  <div style={{ color: '#ff8080' }}>{r.error}</div>
-                ) : (
-                  <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' }}>
-                    {r.text?.slice(0, 10000) || ''}
-                  </pre>
-                )}
+
+                <ResultPreview result={results[selected]} />
               </div>
-            ))}
+            )}
           </div>
         </div>
       </div>
     </div>
   );
 }
+
+function ResultPreview({ result }) {
+  const content = useMemo(() => {
+    if (!result) return { text: '', json: null };
+    const raw = result.text || '';
+    // Try to parse as JSON if it looks like JSON
+    const trimmed = raw.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']')))
+      try { return { text: '', json: JSON.parse(raw) }; } catch { /* ignore */ }
+    return { text: raw, json: null };
+  }, [result]);
+
+  const copyToClipboard = async () => {
+    try {
+      const s = content.json ? JSON.stringify(content.json, null, 2) : (content.text || '');
+      await navigator.clipboard.writeText(s);
+      alert('Copied to clipboard');
+    } catch {
+      alert('Copy failed');
+    }
+  };
+
+  const downloadAs = (ext) => {
+    const filename = (result?.filename || 'output') + (ext.startsWith('.') ? ext : `.${ext}`);
+    const data = content.json ? JSON.stringify(content.json, null, 2) : (content.text || '');
+    const blob = new Blob([data], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  if (!result) return null;
+  return (
+    <div style={{ background: '#0e1729', borderRadius: 8, padding: 12, minHeight: 320 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div>
+          <strong>{result.filename}</strong>
+          <span style={{ opacity: 0.7, marginLeft: 10 }}>{result.type}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={copyToClipboard} style={btnStyle}>Copy</button>
+          <button onClick={() => downloadAs('txt')} style={btnStyle}>Download .txt</button>
+          {content.json && <button onClick={() => downloadAs('json')} style={btnStyle}>Download .json</button>}
+        </div>
+      </div>
+
+      {result.error ? (
+        <div style={{ color: '#ff8080' }}>{result.error}</div>
+      ) : content.json ? (
+        <pre style={preStyle}>{JSON.stringify(content.json, null, 2)}</pre>
+      ) : (
+        <pre style={preStyle}>{content.text?.slice(0, 200000) || ''}</pre>
+      )}
+    </div>
+  );
+}
+
+const btnStyle = {
+  padding: '8px 12px',
+  background: '#2AA876',
+  border: 'none',
+  borderRadius: 6,
+  color: '#fff',
+  cursor: 'pointer'
+};
+
+const preStyle = {
+  whiteSpace: 'pre-wrap',
+  margin: 0,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+};
