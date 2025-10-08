@@ -168,6 +168,10 @@ export default async function handler(req, res) {
           const universal = buildUniversalStructured(text, meta || {});
           // only emit a single structured JSON file per upload (named *_structured.json)
           results.push({ filename: `${nameBase}_structured.json`, type: 'structured', content: JSON.stringify(universal) });
+          // If tables were detected, also emit the raw extracted text file for review
+          if (Array.isArray(universal.tables) && universal.tables.length > 0) {
+            results.push({ filename: `${nameBase}_extracted.txt`, type: 'extracted-text', content: text });
+          }
         }
       } catch (e) {
         results.push({ filename: originalFilename, error: e.message || 'Failed to process' });
