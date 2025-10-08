@@ -27,6 +27,99 @@ async function parseMultipart(req) {
   });
 }
 
+// Build invoice/bill structured JSON from raw OCR text
+function buildInvoiceStructured(text = '') {
+  const out = {};
+  if (!text || !text.trim()) return out;
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  // Vendor name heuristic: first non-empty line before 'invoice' or 'bill'
+  const invIdx = lines.findIndex(l => /\b(invoice|bill)\b/i.test(l));
+  if (invIdx > 0) out.vendor_name = lines[Math.max(0, invIdx - 1)];
+  else if (lines[0] && lines[0].length <= 64) out.vendor_name = lines[0];
+
+  // Dates
+  const dateRe = /(\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b)/;
+  const normDate = (s)=>{
+    if(!s) return undefined; const p = s.replace(/\./g,'/').replace(/-/g,'/');
+    const parts = p.split('/');
+    if (parts.length===3) {
+      let [a,b,c]=parts.map(x=>x.padStart(2,'0'));
+      if (c.length===2) c = '20'+c; // 2-digit year
+      // If YYYY/MM/DD, swap to MM/DD/YYYY
+      if (a.length===4) { const y=a; a=b; b=c; c=y; }
+      return `${c}-${a}-${b}`; // YYYY-MM-DD
+    }
+    return s;
+  };
+  for (const l of lines) {
+    if (!out.invoice_date && /invoice\s*date/i.test(l) && dateRe.test(l)) out.invoice_date = normDate(l.match(dateRe)[1]);
+    if (!out.due_date && /due\s*date/i.test(l) && dateRe.test(l)) out.due_date = normDate(l.match(dateRe)[1]);
+  }
+  if (!out.invoice_date) {
+    const firstDate = lines.map(l => (l.match(dateRe)||[])[1]).filter(Boolean)[0];
+    if (firstDate) out.invoice_date = normDate(firstDate);
+  }
+
+  // Invoice number
+  const invNoRe = /(invoice\s*(number|no\.?|#)\s*[:\-]?\s*([A-Za-z0-9\-]+))|(\b#\s*([A-Za-z0-9\-]{4,}))|(\binvoice\b\s*([A-Za-z0-9\-]{4,}))/i;
+  for (const l of lines) {
+    const m = l.match(invNoRe);
+    if (m && !out.invoice_number) out.invoice_number = (m[3] || m[5] || m[7] || '').replace(/^#\s*/, '');
+  }
+
+  // Amounts
+  const moneyRe = /\$?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/;
+  const toFloat = (s)=>{ if(!s) return undefined; const n=s.replace(/[$,\s]/g,''); const v=parseFloat(n); return isNaN(v)?undefined:v; };
+  for (const l of lines) {
+    if (out.subtotal==null && /\bsub\s*total\b/i.test(l) && moneyRe.test(l)) out.subtotal = toFloat(l.match(moneyRe)[0]);
+    if (out.tax==null && /\b(tax|gst|vat)\b/i.test(l) && moneyRe.test(l)) out.tax = toFloat(l.match(moneyRe)[0]);
+    if (out.total==null && /\btotal\b/i.test(l) && moneyRe.test(l)) out.total = toFloat(l.match(moneyRe)[0]);
+  }
+  if (out.total == null) {
+    const amounts = lines.flatMap(l => (l.match(new RegExp(moneyRe,'g'))||[])).map(toFloat).filter(v=>typeof v==='number');
+    if (amounts.length) out.total = Math.max(...amounts);
+  }
+
+  // Items
+  let items = [];
+  const headerIdx = lines.findIndex(l => /(qty|quantity)\b/i.test(l) && /(item|description)\b/i.test(l) && /(rate|price)\b/i.test(l) && /amount\b/i.test(l));
+  if (headerIdx >= 0) {
+    for (let i = headerIdx + 1; i < lines.length; i++) {
+      const row = lines[i];
+      if (!row || /^[-_\s]*$/.test(row)) break;
+      let cols = row.includes(',') ? row.split(',').map(s=>s.trim()).filter(Boolean) : row.split(/\s{2,}/).map(s=>s.trim()).filter(Boolean);
+      if (cols.length >= 3) {
+        const nums = cols.map(c=>toFloat(c));
+        const numIdx = nums.map((n,idx)=>({n,idx})).filter(x=>typeof x.n==='number').map(x=>x.idx);
+        let obj = {};
+        if (numIdx.length >= 2) {
+          const [qIdx, ...rest] = numIdx;
+          const amountIdx = rest[rest.length-1];
+          const rateIdx = rest.length>1 ? rest[0] : undefined;
+          obj.quantity = nums[qIdx];
+          if (rateIdx!=null) obj.rate = nums[rateIdx];
+          obj.amount = nums[amountIdx];
+          const descParts = cols.filter((_,i)=> i!==qIdx && i!==rateIdx && i!==amountIdx);
+          obj.description = descParts.join(' ');
+        } else {
+          obj.description = cols[0];
+          obj.quantity = toFloat(cols[1]);
+          obj.rate = toFloat(cols[2]);
+          obj.amount = toFloat(cols[3] || '');
+        }
+        if (obj.description || obj.amount!=null) items.push(obj);
+      } else if (items.length) {
+        items[items.length-1].description = (items[items.length-1].description? items[items.length-1].description+' ' : '') + row;
+      }
+      if (items.length >= 2000) break;
+    }
+  }
+  if (items.length) out.items = items;
+  out.raw_text = text;
+  return out;
+}
+
 function isPdf(filename = '') {
   return filename.toLowerCase().endsWith('.pdf');
 }
@@ -246,6 +339,12 @@ export default async function handler(req, res) {
             }
           };
           results.push({ filename: `${nameBase}_structured.json`, type: 'structured', text: JSON.stringify(structured) });
+
+          // Emit invoice-focused JSON when applicable
+          const invoice = buildInvoiceStructured(text);
+          if (invoice && Object.keys(invoice).length > 1) {
+            results.push({ filename: `${nameBase}_invoice.json`, type: 'invoice', text: JSON.stringify(invoice) });
+          }
         }
       } catch (e) {
         results.push({ filename: originalFilename, error: e.message || 'Failed to process' });
