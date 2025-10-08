@@ -2,6 +2,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import vision from '@google-cloud/vision';
 import pdfParse from 'pdf-parse';
+import { normalizeAmount, normalizeDate, extractKeyValues, extractTables, detectDocumentType, buildInvoiceStructured, buildUniversalStructured, inferLooseValues } from '../../lib/ocr-utils';
 
 export const config = {
   api: {
@@ -10,329 +11,25 @@ export const config = {
 };
 
 function mapProvider(provider, email) {
-  const p = (provider || '').toLowerCase();
+  const p = (provider || '').toLowerCase().trim();
+  // Auto-detect from email domain
+  const domainFromEmail = (email || '').split('@').pop()?.toLowerCase() || '';
   if (!p || p === 'auto detect' || p === 'auto') {
-    const domain = (email || '').split('@').pop()?.toLowerCase() || '';
-    if (domain.includes('gmail')) return { host: 'imap.gmail.com', port: 993, secure: true };
-    if (domain.includes('outlook') || domain.includes('hotmail') || domain.includes('live')) return { host: 'outlook.office365.com', port: 993, secure: true };
-    if (domain.includes('yahoo')) return { host: 'imap.mail.yahoo.com', port: 993, secure: true };
-    if (domain.includes('icloud') || domain.includes('me.com')) return { host: 'imap.mail.me.com', port: 993, secure: true };
-    if (domain.includes('aol')) return { host: 'imap.aol.com', port: 993, secure: true };
-    return { host: `imap.${domain}`, port: 993, secure: true };
+    if (domainFromEmail.includes('gmail')) return { host: 'imap.gmail.com', port: 993, secure: true };
+    if (domainFromEmail.includes('outlook') || domainFromEmail.includes('hotmail') || domainFromEmail.includes('live')) return { host: 'outlook.office365.com', port: 993, secure: true };
+    if (domainFromEmail.includes('yahoo')) return { host: 'imap.mail.yahoo.com', port: 993, secure: true };
+    if (domainFromEmail.includes('icloud') || domainFromEmail.includes('me.com')) return { host: 'imap.mail.me.com', port: 993, secure: true };
+    if (domainFromEmail.includes('aol')) return { host: 'imap.aol.com', port: 993, secure: true };
+    return { host: `imap.${domainFromEmail}`, port: 993, secure: true };
   }
-
-// UNIVERSAL post-processor per user's schema
-function normalizeAmount(s) {
-  if (s == null) return undefined;
-  const n = String(s).replace(/[^0-9.,-]/g, '').replace(/,(?=\d{3}(\D|$))/g, '').replace(/,/g, '.');
-  const v = parseFloat(n);
-  return isNaN(v) ? undefined : v;
-}
-
-function normalizeDate(s) {
-  if (!s) return undefined;
-  const t = String(s).trim().replace(/\./g, '/').replace(/-/g, '/');
-  const m = t.match(/(\d{1,4})[\/](\d{1,2})[\/](\d{1,4})/);
-  if (!m) return undefined;
-  let a = m[1], b = m[2], c = m[3];
-  // If first is year
-  if (a.length === 4) { const y = a; a = b; b = c; c = y; }
-  if (c.length === 2) c = '20' + c;
-  a = a.padStart(2, '0'); b = b.padStart(2, '0');
-  return `${c}-${a}-${b}`; // YYYY-MM-DD
-}
-
-function buildUniversalStructured(text = '', meta = {}) {
-  const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const raw_text = text || '';
-  const producer = (meta?.info?.Producer) || meta?.info?.producer || undefined;
-  const created_at = normalizeDate(meta?.info?.CreationDate?.replace(/^D:/, '')) || undefined;
-
-  // Document type
-  const dt = (detectDocumentType(text) || 'unknown').toLowerCase().replace(/\s+/g, '_');
-
-  // Key-Value pairs
-  const kv = [];
-  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
-  for (const l of lines) {
-    const m = l.match(kvRe);
-    if (m && m.groups) kv.push({ key: m.groups.key.trim(), value: m.groups.val.trim() });
-  }
-
-  // Amounts and currency
-  const moneyRe = /([€$₹])?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/g;
-  let currency = undefined; let subtotal, tax, total;
-  for (const l of lines) {
-    const arr = l.match(moneyRe) || [];
-    if (arr.length) {
-      if (!currency) {
-        const m = l.match(/[€$₹]/); if (m) currency = m[0];
-      }
-      if (/\bsub\s*total\b/i.test(l)) subtotal = normalizeAmount(arr[arr.length - 1]);
-      if (/\b(tax|gst|vat)\b/i.test(l)) tax = normalizeAmount(arr[arr.length - 1]);
-      if (/\btotal\b/i.test(l)) total = normalizeAmount(arr[arr.length - 1]);
-    }
-  }
-  if (total == null) {
-    const amounts = (raw_text.match(moneyRe) || []).map(normalizeAmount).filter(v => typeof v === 'number');
-    if (amounts.length) total = Math.max(...amounts);
-  }
-
-  // Dates
-  const dateCand = lines.flatMap(l => (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g) || []).map(normalizeDate)).filter(Boolean);
-  let invoice_date, due_date, ship_date;
-  for (const l of lines) {
-    const d = (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/) || [])[0];
-    if (!d) continue;
-    const nd = normalizeDate(d);
-    if (!invoice_date && /invoice\s*date/i.test(l)) invoice_date = nd;
-    if (!due_date && /due\s*date/i.test(l)) due_date = nd;
-    if (!ship_date && /ship\s*date/i.test(l)) ship_date = nd;
-  }
-  if (!invoice_date) invoice_date = dateCand[0];
-
-  // Numbers
-  const findFirst = (regex) => {
-    for (const l of lines) { const m = l.match(regex); if (m) return m[1] || m[0]; }
-    return undefined;
-  };
-  const invoice_number = findFirst(/invoice\s*(number|no\.?|#)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i) || findFirst(/#\s*([A-Za-z0-9\-]{4,})/i);
-  const order_number = findFirst(/\b(?:SO|PO|Order)\s*#?\s*([A-Za-z0-9\-]+)/i);
-
-  // Vendor name heuristic
-  let vendor_name;
-  const invIdx = lines.findIndex(l => /\b(invoice|bill|statement|order)\b/i.test(l));
-  if (invIdx > 0) vendor_name = lines[Math.max(0, invIdx - 1)];
-  if (!vendor_name && lines[0] && lines[0].length <= 64) vendor_name = lines[0];
-
-  // Items and Orders (simple aggregation)
-  const items = extractTables(text).flatMap(t => t.rows || []);
-  const orders = [];
-  if (order_number) {
-    orders.push({
-      order_number,
-      po_number: findFirst(/\bPO\s*#?\s*([A-Za-z0-9\-]+)/i),
-      customer: { name: undefined, address: undefined, country: undefined },
-      freight_terms: findFirst(/\bterms?\b[:\-]?\s*(.+)/i),
-      carrier: findFirst(/\bcarrier\b[:\-]?\s*(.+)/i),
-      ship_via: findFirst(/\bship\s*via\b[:\-]?\s*(.+)/i),
-      shipping_notes: undefined,
-      items: items.map(r => ({
-        item_code: r.item_code || r.code || undefined,
-        upc: r.upc || undefined,
-        description: r.description || r.item || r.name || undefined,
-        quantity: normalizeAmount(r.quantity) || undefined,
-        rate: normalizeAmount(r.rate) || undefined,
-        amount: normalizeAmount(r.amount) || undefined,
-      })),
-      total
-    });
-  }
-
-  // Build universal JSON
-  const universal = {
-    metadata: {
-      numpages: meta?.numpages ?? undefined,
-      producer: producer ?? undefined,
-      created_at: created_at ?? undefined,
-    },
-    document_type: dt || 'unknown',
-    document_summary: {
-      vendor_name: vendor_name ?? undefined,
-      invoice_number: invoice_number ?? undefined,
-      order_number: order_number ?? undefined,
-      invoice_date: invoice_date ?? undefined,
-      due_date: due_date ?? undefined,
-      ship_date: ship_date ?? undefined,
-      subtotal: subtotal ?? undefined,
-      tax: tax ?? undefined,
-      total: total ?? undefined,
-      currency: currency ?? undefined,
-    },
-    orders,
-    key_value_pairs: kv,
-    unstructured_values: [],
-    raw_text,
-  };
-  return universal;
-}
-
-// Build invoice/bill structured JSON from raw OCR text
-function buildInvoiceStructured(text = '') {
-  const out = {};
-  if (!text || !text.trim()) return out;
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-
-  // Vendor name heuristic: first non-empty line before a line that contains 'invoice' or 'bill'
-  const invIdx = lines.findIndex(l => /\b(invoice|bill)\b/i.test(l));
-  if (invIdx > 0) {
-    out.vendor_name = lines[Math.max(0, invIdx - 1)];
-  } else {
-    // Fallback to the very first line as vendor/company if it looks like a name
-    if (lines[0] && lines[0].length <= 64) out.vendor_name = lines[0];
-  }
-
-  // Dates
-  const dateRe = /(\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b)/;
-  for (const l of lines) {
-    if (!out.invoice_date && /invoice\s*date/i.test(l) && dateRe.test(l)) out.invoice_date = l.match(dateRe)[1];
-    if (!out.due_date && /due\s*date/i.test(l) && dateRe.test(l)) out.due_date = l.match(dateRe)[1];
-  }
-  if (!out.invoice_date) {
-    const firstDate = lines.map(l => (l.match(dateRe)||[])[1]).filter(Boolean)[0];
-    if (firstDate) out.invoice_date = firstDate;
-  }
-
-  // Invoice number
-  const invNoRe = /(invoice\s*(number|no\.?|#)\s*[:\-]?\s*([A-Za-z0-9\-]+))|(\b#\s*([A-Za-z0-9\-]{4,}))|(\binvoice\b\s*([A-Za-z0-9\-]{4,}))/i;
-  for (const l of lines) {
-    const m = l.match(invNoRe);
-    if (m && !out.invoice_number) {
-      out.invoice_number = (m[3] || m[5] || m[7] || '').replace(/^#\s*/, '');
-    }
-  }
-
-  // Amounts
-  const moneyRe = /\$?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/;
-  function toFloat(s){ if(!s) return undefined; const n = s.replace(/[$,\s]/g,''); const v=parseFloat(n); return isNaN(v)?undefined:v; }
-  for (const l of lines) {
-    if (!out.subtotal && /\bsub\s*total\b/i.test(l) && moneyRe.test(l)) out.subtotal = toFloat(l.match(moneyRe)[0]);
-    if (!out.tax && /\b(tax|gst|vat)\b/i.test(l) && moneyRe.test(l)) out.tax = toFloat(l.match(moneyRe)[0]);
-    if (!out.total && /\btotal\b/i.test(l) && moneyRe.test(l)) out.total = toFloat(l.match(moneyRe)[0]);
-  }
-  // If multiple amounts exist and total missing, choose largest as total
-  if (out.total == null) {
-    const amounts = lines.flatMap(l => (l.match(new RegExp(moneyRe,'g'))||[])).map(toFloat).filter(v=>typeof v==='number');
-    if (amounts.length) out.total = Math.max(...amounts);
-  }
-
-  // Items table: look for a header line with quantity/item/rate/amount
-  let items = [];
-  const headerIdx = lines.findIndex(l => /(qty|quantity)\b/i.test(l) && /(item|description)\b/i.test(l) && /(rate|price)\b/i.test(l) && /amount\b/i.test(l));
-  if (headerIdx >= 0) {
-    for (let i = headerIdx + 1; i < lines.length; i++) {
-      const row = lines[i];
-      if (!row || /^[-_\s]*$/.test(row)) break;
-      // Try CSV split first then space-aligned
-      let cols = row.includes(',') ? row.split(',').map(s=>s.trim()).filter(Boolean) : row.split(/\s{2,}/).map(s=>s.trim()).filter(Boolean);
-      if (cols.length >= 3) {
-        // Heuristic mapping
-        let obj = {};
-        // If numeric-col present, assign quantity/rate/amount
-        const nums = cols.map(c=>toFloat(c));
-        const numIdx = nums.map((n,idx)=>({n,idx})).filter(x=>typeof x.n==='number').map(x=>x.idx);
-        // description assumed as the first non-numeric or middle chunk
-        if (numIdx.length >= 2) {
-          const [qIdx, ...rest] = numIdx;
-          const amountIdx = rest[rest.length-1];
-          const rateIdx = rest.length>1? rest[0] : undefined;
-          obj.quantity = nums[qIdx];
-          if (rateIdx!=null) obj.rate = nums[rateIdx];
-          obj.amount = nums[amountIdx];
-          // description combines remaining string parts
-          const descParts = cols.filter((_,i)=> i!==qIdx && i!==rateIdx && i!==amountIdx);
-          obj.description = descParts.join(' ');
-        } else {
-          // fallback positional
-          obj.description = cols[0];
-          obj.quantity = toFloat(cols[1]);
-          obj.rate = toFloat(cols[2]);
-          obj.amount = toFloat(cols[3] || '');
-        }
-        // Only push if something meaningful exists
-        if (obj.description || obj.amount!=null) items.push(obj);
-      } else {
-        // Single value line: append to last description
-        if (items.length) items[items.length-1].description = (items[items.length-1].description? items[items.length-1].description+' ' : '') + row;
-      }
-      if (items.length >= 2000) break;
-    }
-  }
-  if (items.length) out.items = items;
-  out.raw_text = text;
-  return out;
-}
-
-// Heuristic document type detection from text
-function detectDocumentType(text = '') {
-  const t = text.toLowerCase();
-  const candidates = [
-    { type: 'Invoice', kws: ['invoice'] },
-    { type: 'Bill', kws: ['bill', 'billing statement'] },
-    { type: 'Pick Ticket', kws: ['pick ticket', 'picking list'] },
-    { type: 'Order', kws: ['purchase order', 'sales order', 'order #', 'order no', 'po #'] },
-    { type: 'Payment', kws: ['payment', 'receipt', 'paid'] },
-    { type: 'Statement', kws: ['statement of account', 'statement'] },
-    { type: 'Delivery Note', kws: ['delivery note', 'delivery order', 'pod'] },
-  ];
-  let best = null, bestScore = 0;
-  for (const c of candidates) {
-    let s = 0; for (const k of c.kws) s += (t.match(new RegExp(k, 'g')) || []).length;
-    if (s > bestScore) { bestScore = s; best = c.type; }
-  }
-  return best;
-}
-
-// Extract simple key:value pairs from text lines
-function extractKeyValues(text = '') {
-  const fields = {};
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(kvRe);
-    if (m && m.groups) {
-      let key = m.groups.key.trim();
-      let val = m.groups.val.trim();
-      if (!fields[key]) fields[key] = val; else {
-        // de-duplicate keys by suffixing index
-        let idx = 2; while (fields[`${key}_${idx}`]) idx++; fields[`${key}_${idx}`] = val;
-      }
-    }
-  }
-  return fields;
-}
-
-// Naive table extraction from text: detect comma or multi-space separated blocks
-function extractTables(text = '') {
-  const tables = [];
-  const blocks = text.split(/\n\s*\n/); // paragraph-like blocks
-  for (const b of blocks) {
-    const lines = b.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    if (lines.length < 2) continue;
-    // CSV-like
-    if (lines.every(l => l.includes(','))) {
-      const headers = lines[0].split(',').map(s => s.trim());
-      const rows = lines.slice(1).map(l => l.split(',').map(s => s.trim()));
-      const objs = rows.slice(0, 2000).map(r => {
-        const o = {}; r.forEach((v, i) => o[headers[i] || `col_${i+1}`] = v); return o;
-      });
-      tables.push({ name: 'table', headers, rows: objs });
-      continue;
-    }
-    // Space-aligned columns (very naive): split by 2+ spaces and require >=2 cols
-    const splitCols = (s) => s.split(/\s{2,}/).map(x => x.trim()).filter(x => x.length > 0);
-    const splitted = lines.map(splitCols);
-    const colCounts = splitted.map(a => a.length);
-    const commonCols = colCounts.reduce((a,b)=> b>1?Math.max(a,b):a, 0);
-    if (commonCols >= 2 && colCounts.filter(c => c>=2).length >= Math.max(2, Math.floor(lines.length*0.6))) {
-      const headers = splitted[0].length>=2 ? splitted[0] : Array.from({length: commonCols}, (_,i)=>`col_${i+1}`);
-      const dataRows = (headers===splitted[0] ? splitted.slice(1) : splitted).filter(r => r.length >= 1);
-      const objs = dataRows.slice(0, 2000).map(r => {
-        const o = {}; r.forEach((v,i)=> o[headers[i] || `col_${i+1}`]=v); return o;
-      });
-      tables.push({ name: 'table', headers, rows: objs });
-    }
-  }
-  return tables;
-}
+  // Explicit provider names
   if (p === 'gmail') return { host: 'imap.gmail.com', port: 993, secure: true };
-  if (p === 'outlook') return { host: 'outlook.office365.com', port: 993, secure: true };
+  if (p === 'outlook' || p === 'office365') return { host: 'outlook.office365.com', port: 993, secure: true };
   if (p === 'yahoo') return { host: 'imap.mail.yahoo.com', port: 993, secure: true };
   if (p === 'icloud') return { host: 'imap.mail.me.com', port: 993, secure: true };
   if (p === 'aol') return { host: 'imap.aol.com', port: 993, secure: true };
-  // Custom: try imap.domain
-  const domain = (email || '').split('@').pop()?.toLowerCase() || '';
-  return { host: `imap.${domain}`, port: 993, secure: true };
+  // Last-resort fallback
+  return { host: `imap.${domainFromEmail}`, port: 993, secure: true };
 }
 
 function isImage(name = '') {
@@ -360,7 +57,11 @@ async function ocrBuffer(client, buf, filename) {
       return { type: 'google-vision', text };
     } catch (e) {
       // Surface a clearer hint when credentials are missing
-      if ((e?.message || '').includes('Could not load the default credentials')) {
+      const msg = (e?.message || '').toString();
+      if (msg.includes('PERMISSION_DENIED') || /billing/i.test(msg)) {
+        throw new Error('Google Vision API permission or billing error: ' + msg + '\nEnable billing for your GCP project and ensure the service account has Vision API access.');
+      }
+      if (msg.includes('Could not load the default credentials')) {
         throw new Error('Google Vision credentials missing. Set GOOGLE_CLOUD_CREDENTIALS or GOOGLE_CLOUD_CREDENTIALS_BASE64 in Vercel environment.');
       }
       throw e;
@@ -495,7 +196,8 @@ export default async function handler(req, res) {
           // For any attachment with text, emit a structured JSON for better understanding
           if (text && text.trim().length > 0) {
             const docType = detectDocumentType(text);
-            const fields = extractKeyValues(text);
+            const { fields, loose } = extractKeyValues(text);
+            const inferred = inferLooseValues(loose, fields);
             const tables = extractTables(text);
             const structured = {
               document_type: docType || null,
@@ -504,7 +206,7 @@ export default async function handler(req, res) {
               text_preview: (text || '').slice(0, 2000),
               // As requested: keep a section named 'text_previewer' with key-values and tables
               text_previewer: {
-                fields,
+                fields: { ...fields, ...inferred },
                 tables
               }
             };

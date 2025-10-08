@@ -3,6 +3,7 @@ import path from 'path';
 import { IncomingForm } from 'formidable';
 import vision from '@google-cloud/vision';
 import pdfParse from 'pdf-parse';
+import { normalizeAmount, normalizeDate, extractKeyValues, extractTables, detectDocumentType, buildInvoiceStructured, buildUniversalStructured, inferLooseValues } from '../../lib/ocr-utils';
 import os from 'os';
 
 export const config = {
@@ -13,243 +14,10 @@ export const config = {
 
 async function parseMultipart(req) {
   // On Vercel, only /tmp is writable
-  const uploadsDir = path.join(os.tmpdir(), 'uploads');
-  await fs.mkdir(uploadsDir, { recursive: true });
-  const form = new IncomingForm({ multiples: true, uploadDir: uploadsDir, keepExtensions: true });
-  return new Promise((resolve, reject) => {
-    form.parse(req, (err, fields, files) => {
-      if (err) return reject(err);
-      let list = files.files;
-      if (!list) return resolve([]);
-      if (!Array.isArray(list)) list = [list];
-      resolve(list.map(f => ({ filepath: f.filepath, originalFilename: f.originalFilename || path.basename(f.filepath) })));
-    });
-  });
+  // Use shared utilities from lib/ocr-utils.js
 }
 
-// UNIVERSAL post-processor per user's schema
-function normalizeAmount(s) {
-  if (s == null) return undefined;
-  const n = String(s).replace(/[^0-9.,-]/g, '').replace(/,(?=\d{3}(\D|$))/g, '').replace(/,/g, '.');
-  const v = parseFloat(n);
-  return isNaN(v) ? undefined : v;
-}
-
-function normalizeDate(s) {
-  if (!s) return undefined;
-  const t = String(s).trim().replace(/\./g, '/').replace(/-/g, '/');
-  const m = t.match(/(\d{1,4})[\/](\d{1,2})[\/](\d{1,4})/);
-  if (!m) return undefined;
-  let a = m[1], b = m[2], c = m[3];
-  if (a.length === 4) { const y = a; a = b; b = c; c = y; }
-  if (c.length === 2) c = '20' + c;
-  a = a.padStart(2, '0'); b = b.padStart(2, '0');
-  return `${c}-${a}-${b}`; // YYYY-MM-DD
-}
-
-function buildUniversalStructured(text = '', meta = {}) {
-  const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const raw_text = text || '';
-  const producer = (meta?.info?.Producer) || meta?.info?.producer || undefined;
-  const created_at = normalizeDate(meta?.info?.CreationDate?.replace(/^D:/, '')) || undefined;
-
-  const dt = (detectDocumentType(text) || 'unknown').toLowerCase().replace(/\s+/g, '_');
-
-  // Key-Value pairs
-  const kv = [];
-  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
-  for (const l of lines) {
-    const m = l.match(kvRe);
-    if (m && m.groups) kv.push({ key: m.groups.key.trim(), value: m.groups.val.trim() });
-  }
-
-  // Amounts and currency
-  const moneyRe = /([€$₹])?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/g;
-  let currency = undefined; let subtotal, tax, total;
-  for (const l of lines) {
-    const arr = l.match(moneyRe) || [];
-    if (arr.length) {
-      if (!currency) { const m = l.match(/[€$₹]/); if (m) currency = m[0]; }
-      if (/\bsub\s*total\b/i.test(l)) subtotal = normalizeAmount(arr[arr.length - 1]);
-      if (/\b(tax|gst|vat)\b/i.test(l)) tax = normalizeAmount(arr[arr.length - 1]);
-      if (/\btotal\b/i.test(l)) total = normalizeAmount(arr[arr.length - 1]);
-    }
-  }
-  if (total == null) {
-    const amounts = (raw_text.match(moneyRe) || []).map(normalizeAmount).filter(v => typeof v === 'number');
-    if (amounts.length) total = Math.max(...amounts);
-  }
-
-  // Dates
-  const dateCand = lines.flatMap(l => (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g) || []).map(normalizeDate)).filter(Boolean);
-  let invoice_date, due_date, ship_date;
-  for (const l of lines) {
-    const d = (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/) || [])[0];
-    if (!d) continue;
-    const nd = normalizeDate(d);
-    if (!invoice_date && /invoice\s*date/i.test(l)) invoice_date = nd;
-    if (!due_date && /due\s*date/i.test(l)) due_date = nd;
-    if (!ship_date && /ship\s*date/i.test(l)) ship_date = nd;
-  }
-  if (!invoice_date) invoice_date = dateCand[0];
-
-  // Numbers
-  const findFirst = (regex) => {
-    for (const l of lines) { const m = l.match(regex); if (m) return m[1] || m[0]; }
-    return undefined;
-  };
-  const invoice_number = findFirst(/invoice\s*(number|no\.?|#)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i) || findFirst(/#\s*([A-Za-z0-9\-]{4,})/i);
-  const order_number = findFirst(/\b(?:SO|PO|Order)\s*#?\s*([A-Za-z0-9\-]+)/i);
-
-  // Vendor name heuristic
-  let vendor_name;
-  const invIdx = lines.findIndex(l => /\b(invoice|bill|statement|order)\b/i.test(l));
-  if (invIdx > 0) vendor_name = lines[Math.max(0, invIdx - 1)];
-  if (!vendor_name && lines[0] && lines[0].length <= 64) vendor_name = lines[0];
-
-  // Items and Orders
-  const items = extractTables(text).flatMap(t => t.rows || []);
-  const orders = [];
-  if (order_number) {
-    orders.push({
-      order_number,
-      po_number: findFirst(/\bPO\s*#?\s*([A-Za-z0-9\-]+)/i),
-      customer: { name: undefined, address: undefined, country: undefined },
-      freight_terms: findFirst(/\bterms?\b[:\-]?\s*(.+)/i),
-      carrier: findFirst(/\bcarrier\b[:\-]?\s*(.+)/i),
-      ship_via: findFirst(/\bship\s*via\b[:\-]?\s*(.+)/i),
-      shipping_notes: undefined,
-      items: items.map(r => ({
-        item_code: r.item_code || r.code || undefined,
-        upc: r.upc || undefined,
-        description: r.description || r.item || r.name || undefined,
-        quantity: normalizeAmount(r.quantity) || undefined,
-        rate: normalizeAmount(r.rate) || undefined,
-        amount: normalizeAmount(r.amount) || undefined,
-      })),
-      total
-    });
-  }
-
-  const universal = {
-    metadata: {
-      numpages: meta?.numpages ?? undefined,
-      producer: producer ?? undefined,
-      created_at: created_at ?? undefined,
-    },
-    document_type: dt || 'unknown',
-    document_summary: {
-      vendor_name: vendor_name ?? undefined,
-      invoice_number: invoice_number ?? undefined,
-      order_number: order_number ?? undefined,
-      invoice_date: invoice_date ?? undefined,
-      due_date: due_date ?? undefined,
-      ship_date: ship_date ?? undefined,
-      subtotal: subtotal ?? undefined,
-      tax: tax ?? undefined,
-      total: total ?? undefined,
-      currency: currency ?? undefined,
-    },
-    orders,
-    key_value_pairs: kv,
-    unstructured_values: [],
-    raw_text,
-  };
-  return universal;
-}
-
-// Build invoice/bill structured JSON from raw OCR text
-function buildInvoiceStructured(text = '') {
-  const out = {};
-  if (!text || !text.trim()) return out;
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-
-  // Vendor name heuristic: first non-empty line before 'invoice' or 'bill'
-  const invIdx = lines.findIndex(l => /\b(invoice|bill)\b/i.test(l));
-  if (invIdx > 0) out.vendor_name = lines[Math.max(0, invIdx - 1)];
-  else if (lines[0] && lines[0].length <= 64) out.vendor_name = lines[0];
-
-  // Dates
-  const dateRe = /(\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b)/;
-  const normDate = (s)=>{
-    if(!s) return undefined; const p = s.replace(/\./g,'/').replace(/-/g,'/');
-    const parts = p.split('/');
-    if (parts.length===3) {
-      let [a,b,c]=parts.map(x=>x.padStart(2,'0'));
-      if (c.length===2) c = '20'+c; // 2-digit year
-      // If YYYY/MM/DD, swap to MM/DD/YYYY
-      if (a.length===4) { const y=a; a=b; b=c; c=y; }
-      return `${c}-${a}-${b}`; // YYYY-MM-DD
-    }
-    return s;
-  };
-  for (const l of lines) {
-    if (!out.invoice_date && /invoice\s*date/i.test(l) && dateRe.test(l)) out.invoice_date = normDate(l.match(dateRe)[1]);
-    if (!out.due_date && /due\s*date/i.test(l) && dateRe.test(l)) out.due_date = normDate(l.match(dateRe)[1]);
-  }
-  if (!out.invoice_date) {
-    const firstDate = lines.map(l => (l.match(dateRe)||[])[1]).filter(Boolean)[0];
-    if (firstDate) out.invoice_date = normDate(firstDate);
-  }
-
-  // Invoice number
-  const invNoRe = /(invoice\s*(number|no\.?|#)\s*[:\-]?\s*([A-Za-z0-9\-]+))|(\b#\s*([A-Za-z0-9\-]{4,}))|(\binvoice\b\s*([A-Za-z0-9\-]{4,}))/i;
-  for (const l of lines) {
-    const m = l.match(invNoRe);
-    if (m && !out.invoice_number) out.invoice_number = (m[3] || m[5] || m[7] || '').replace(/^#\s*/, '');
-  }
-
-  // Amounts
-  const moneyRe = /\$?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/;
-  const toFloat = (s)=>{ if(!s) return undefined; const n=s.replace(/[$,\s]/g,''); const v=parseFloat(n); return isNaN(v)?undefined:v; };
-  for (const l of lines) {
-    if (out.subtotal==null && /\bsub\s*total\b/i.test(l) && moneyRe.test(l)) out.subtotal = toFloat(l.match(moneyRe)[0]);
-    if (out.tax==null && /\b(tax|gst|vat)\b/i.test(l) && moneyRe.test(l)) out.tax = toFloat(l.match(moneyRe)[0]);
-    if (out.total==null && /\btotal\b/i.test(l) && moneyRe.test(l)) out.total = toFloat(l.match(moneyRe)[0]);
-  }
-  if (out.total == null) {
-    const amounts = lines.flatMap(l => (l.match(new RegExp(moneyRe,'g'))||[])).map(toFloat).filter(v=>typeof v==='number');
-    if (amounts.length) out.total = Math.max(...amounts);
-  }
-
-  // Items
-  let items = [];
-  const headerIdx = lines.findIndex(l => /(qty|quantity)\b/i.test(l) && /(item|description)\b/i.test(l) && /(rate|price)\b/i.test(l) && /amount\b/i.test(l));
-  if (headerIdx >= 0) {
-    for (let i = headerIdx + 1; i < lines.length; i++) {
-      const row = lines[i];
-      if (!row || /^[-_\s]*$/.test(row)) break;
-      let cols = row.includes(',') ? row.split(',').map(s=>s.trim()).filter(Boolean) : row.split(/\s{2,}/).map(s=>s.trim()).filter(Boolean);
-      if (cols.length >= 3) {
-        const nums = cols.map(c=>toFloat(c));
-        const numIdx = nums.map((n,idx)=>({n,idx})).filter(x=>typeof x.n==='number').map(x=>x.idx);
-        let obj = {};
-        if (numIdx.length >= 2) {
-          const [qIdx, ...rest] = numIdx;
-          const amountIdx = rest[rest.length-1];
-          const rateIdx = rest.length>1 ? rest[0] : undefined;
-          obj.quantity = nums[qIdx];
-          if (rateIdx!=null) obj.rate = nums[rateIdx];
-          obj.amount = nums[amountIdx];
-          const descParts = cols.filter((_,i)=> i!==qIdx && i!==rateIdx && i!==amountIdx);
-          obj.description = descParts.join(' ');
-        } else {
-          obj.description = cols[0];
-          obj.quantity = toFloat(cols[1]);
-          obj.rate = toFloat(cols[2]);
-          obj.amount = toFloat(cols[3] || '');
-        }
-        if (obj.description || obj.amount!=null) items.push(obj);
-      } else if (items.length) {
-        items[items.length-1].description = (items[items.length-1].description? items[items.length-1].description+' ' : '') + row;
-      }
-      if (items.length >= 2000) break;
-    }
-  }
-  if (items.length) out.items = items;
-  out.raw_text = text;
-  return out;
-}
+// helpers are provided by lib/ocr-utils.js
 
 function isPdf(filename = '') {
   return filename.toLowerCase().endsWith('.pdf');
@@ -288,88 +56,7 @@ function csvPreviewJson(csvText) {
   }
 }
 
-function detectDocumentType(text = '') {
-  const t = text.toLowerCase();
-  const candidates = [
-    { type: 'Invoice', kws: ['invoice'] },
-    { type: 'Bill', kws: ['bill', 'billing statement'] },
-    { type: 'Pick Ticket', kws: ['pick ticket', 'picking list'] },
-    { type: 'Order', kws: ['purchase order', 'sales order', 'order #', 'order no', 'po #'] },
-    { type: 'Payment', kws: ['payment', 'receipt', 'paid'] },
-    { type: 'Statement', kws: ['statement of account', 'statement'] },
-    { type: 'Delivery Note', kws: ['delivery note', 'delivery order', 'pod'] },
-  ];
-  let best = null, bestScore = 0;
-  for (const c of candidates) {
-    let s = 0; for (const k of c.kws) s += (t.match(new RegExp(k, 'g')) || []).length;
-    if (s > bestScore) { bestScore = s; best = c.type; }
-  }
-  return best;
-}
-
-function extractKeyValues(text = '') {
-  const fields = {};
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
-  const loose = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(kvRe);
-    if (m && m.groups) {
-      let key = m.groups.key.trim();
-      let val = m.groups.val.trim();
-      if (!fields[key]) fields[key] = val; else { let idx = 2; while (fields[`${key}_${idx}`]) idx++; fields[`${key}_${idx}`] = val; }
-    } else {
-      loose.push(lines[i]);
-    }
-  }
-  return { fields, loose };
-}
-
-function inferLooseValues(loose = [], fields = {}) {
-  const inferred = {};
-  const dateRe = /(\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b)/;
-  const amountRe = /\$?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/;
-  const invoiceRe = /(invoice\s*#?\s*\w+|#\s*\d{3,})/i;
-  let labelIdx = 1;
-  for (const line of loose) {
-    const l = line.trim();
-    if (!fields['Due Date'] && /due date/i.test(l) && dateRe.test(l)) { inferred['Due Date'] = l.match(dateRe)[1]; continue; }
-    if (!fields['Date'] && dateRe.test(l)) { inferred['Date'] = l.match(dateRe)[1]; continue; }
-    if (!fields['Total'] && /total/i.test(l) && amountRe.test(l)) { inferred['Total'] = l.match(amountRe)[0]; continue; }
-    if (!fields['Invoice No'] && invoiceRe.test(l)) { inferred['Invoice No'] = l.match(invoiceRe)[1]; continue; }
-    // fallback generic label
-    let key = `label_${labelIdx++}`;
-    inferred[key] = l;
-  }
-  return inferred;
-}
-
-function extractTables(text = '') {
-  const tables = [];
-  const blocks = text.split(/\n\s*\n/);
-  for (const b of blocks) {
-    const lines = b.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    if (lines.length < 2) continue;
-    if (lines.every(l => l.includes(','))) {
-      const headers = lines[0].split(',').map(s => s.trim());
-      const rows = lines.slice(1).map(l => l.split(',').map(s => s.trim()));
-      const objs = rows.slice(0, 2000).map(r => { const o = {}; r.forEach((v,i)=> o[headers[i] || `col_${i+1}`]=v); return o; });
-      tables.push({ name: 'table', headers, rows: objs });
-      continue;
-    }
-    const splitCols = (s) => s.split(/\s{2,}/).map(x => x.trim()).filter(x => x.length>0);
-    const splitted = lines.map(splitCols);
-    const colCounts = splitted.map(a=>a.length);
-    const commonCols = colCounts.reduce((a,b)=> b>1?Math.max(a,b):a, 0);
-    if (commonCols >= 2 && colCounts.filter(c=>c>=2).length >= Math.max(2, Math.floor(lines.length*0.6))) {
-      const headers = splitted[0].length>=2 ? splitted[0] : Array.from({length: commonCols}, (_,i)=>`col_${i+1}`);
-      const dataRows = (headers===splitted[0] ? splitted.slice(1) : splitted).filter(r=>r.length>=1);
-      const objs = dataRows.slice(0,2000).map(r=>{ const o={}; r.forEach((v,i)=>o[headers[i]||`col_${i+1}`]=v); return o; });
-      tables.push({ name: 'table', headers, rows: objs });
-    }
-  }
-  return tables;
-}
+// helpers delegated to lib/ocr-utils.js
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method not allowed');
@@ -422,9 +109,21 @@ export default async function handler(req, res) {
           type = 'pdf-parse';
           meta = { numpages: pdf.numpages || undefined, info: pdf.info || undefined, text_preview: (text||'').slice(0,2000) };
         } else if (isImage(originalFilename)) {
-          const [result] = await client.documentTextDetection(filepath);
-          text = result?.fullTextAnnotation?.text || (result?.textAnnotations?.[0]?.description ?? '');
-          type = 'google-vision';
+          try {
+            const [result] = await client.documentTextDetection(filepath);
+            text = result?.fullTextAnnotation?.text || (result?.textAnnotations?.[0]?.description ?? '');
+            type = 'google-vision';
+          } catch (e) {
+            // Surface actionable message for billing/permission issues
+            const msg = (e?.message || '').toString();
+            if (msg.includes('PERMISSION_DENIED') || /billing/i.test(msg)) {
+              throw new Error('Google Vision API permission or billing error: ' + msg + '\nEnable billing for your GCP project and ensure the service account has Vision API access.');
+            }
+            if (msg.includes('Could not load the default credentials')) {
+              throw new Error('Google Vision credentials missing. Set GOOGLE_CLOUD_CREDENTIALS or GOOGLE_CLOUD_CREDENTIALS_BASE64 in Vercel environment.');
+            }
+            throw e;
+          }
         } else if (isText(originalFilename)) {
           const data = await fs.readFile(filepath, 'utf-8');
           text = data;
