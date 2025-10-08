@@ -20,6 +20,79 @@ function mapProvider(provider, email) {
     if (domain.includes('aol')) return { host: 'imap.aol.com', port: 993, secure: true };
     return { host: `imap.${domain}`, port: 993, secure: true };
   }
+
+// Heuristic document type detection from text
+function detectDocumentType(text = '') {
+  const t = text.toLowerCase();
+  const candidates = [
+    { type: 'Invoice', kws: ['invoice'] },
+    { type: 'Bill', kws: ['bill', 'billing statement'] },
+    { type: 'Pick Ticket', kws: ['pick ticket', 'picking list'] },
+    { type: 'Order', kws: ['purchase order', 'sales order', 'order #', 'order no', 'po #'] },
+    { type: 'Payment', kws: ['payment', 'receipt', 'paid'] },
+    { type: 'Statement', kws: ['statement of account', 'statement'] },
+    { type: 'Delivery Note', kws: ['delivery note', 'delivery order', 'pod'] },
+  ];
+  let best = null, bestScore = 0;
+  for (const c of candidates) {
+    let s = 0; for (const k of c.kws) s += (t.match(new RegExp(k, 'g')) || []).length;
+    if (s > bestScore) { bestScore = s; best = c.type; }
+  }
+  return best;
+}
+
+// Extract simple key:value pairs from text lines
+function extractKeyValues(text = '') {
+  const fields = {};
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(kvRe);
+    if (m && m.groups) {
+      let key = m.groups.key.trim();
+      let val = m.groups.val.trim();
+      if (!fields[key]) fields[key] = val; else {
+        // de-duplicate keys by suffixing index
+        let idx = 2; while (fields[`${key}_${idx}`]) idx++; fields[`${key}_${idx}`] = val;
+      }
+    }
+  }
+  return fields;
+}
+
+// Naive table extraction from text: detect comma or multi-space separated blocks
+function extractTables(text = '') {
+  const tables = [];
+  const blocks = text.split(/\n\s*\n/); // paragraph-like blocks
+  for (const b of blocks) {
+    const lines = b.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) continue;
+    // CSV-like
+    if (lines.every(l => l.includes(','))) {
+      const headers = lines[0].split(',').map(s => s.trim());
+      const rows = lines.slice(1).map(l => l.split(',').map(s => s.trim()));
+      const objs = rows.slice(0, 2000).map(r => {
+        const o = {}; r.forEach((v, i) => o[headers[i] || `col_${i+1}`] = v); return o;
+      });
+      tables.push({ name: 'table', headers, rows: objs });
+      continue;
+    }
+    // Space-aligned columns (very naive): split by 2+ spaces and require >=2 cols
+    const splitCols = (s) => s.split(/\s{2,}/).map(x => x.trim()).filter(x => x.length > 0);
+    const splitted = lines.map(splitCols);
+    const colCounts = splitted.map(a => a.length);
+    const commonCols = colCounts.reduce((a,b)=> b>1?Math.max(a,b):a, 0);
+    if (commonCols >= 2 && colCounts.filter(c => c>=2).length >= Math.max(2, Math.floor(lines.length*0.6))) {
+      const headers = splitted[0].length>=2 ? splitted[0] : Array.from({length: commonCols}, (_,i)=>`col_${i+1}`);
+      const dataRows = (headers===splitted[0] ? splitted.slice(1) : splitted).filter(r => r.length >= 1);
+      const objs = dataRows.slice(0, 2000).map(r => {
+        const o = {}; r.forEach((v,i)=> o[headers[i] || `col_${i+1}`]=v); return o;
+      });
+      tables.push({ name: 'table', headers, rows: objs });
+    }
+  }
+  return tables;
+}
   if (p === 'gmail') return { host: 'imap.gmail.com', port: 993, secure: true };
   if (p === 'outlook') return { host: 'outlook.office365.com', port: 993, secure: true };
   if (p === 'yahoo') return { host: 'imap.mail.yahoo.com', port: 993, secure: true };
@@ -41,12 +114,25 @@ function isCsv(name = '') { return name.toLowerCase().endsWith('.csv'); }
 async function ocrBuffer(client, buf, filename) {
   if (isPdf(filename)) {
     const pdf = await pdfParse(buf);
-    return { type: 'pdf-parse', text: pdf.text || '' };
+    const meta = {
+      numpages: pdf.numpages || undefined,
+      info: pdf.info || undefined,
+      text_preview: (pdf.text || '').slice(0, 2000)
+    };
+    return { type: 'pdf-parse', text: pdf.text || '', meta };
   }
   if (isImage(filename)) {
-    const [result] = await client.textDetection({ image: { content: buf } });
-    const text = result?.fullTextAnnotation?.text || (result?.textAnnotations?.[0]?.description ?? '');
-    return { type: 'google-vision', text };
+    try {
+      const [result] = await client.documentTextDetection({ image: { content: buf } });
+      const text = result?.fullTextAnnotation?.text || (result?.textAnnotations?.[0]?.description ?? '');
+      return { type: 'google-vision', text };
+    } catch (e) {
+      // Surface a clearer hint when credentials are missing
+      if ((e?.message || '').includes('Could not load the default credentials')) {
+        throw new Error('Google Vision credentials missing. Set GOOGLE_CLOUD_CREDENTIALS or GOOGLE_CLOUD_CREDENTIALS_BASE64 in Vercel environment.');
+      }
+      throw e;
+    }
   }
   if (isText(filename)) {
     return { type: 'text', text: buf.toString('utf-8') };
@@ -151,7 +237,7 @@ export default async function handler(req, res) {
           // Always emit the original as a list item (no content to preview)
           results.push({ filename, type: 'Original', text: '' });
 
-          const { type, text } = await ocrBuffer(visionClient, content, filename);
+          const { type, text, meta } = await ocrBuffer(visionClient, content, filename);
 
           // Emit extracted text as a generated file name
           const nameBase = baseName(filename);
@@ -167,6 +253,31 @@ export default async function handler(req, res) {
             const parsed = csvPreviewJson(text || content.toString('utf-8'));
             const jsonName = `${nameBase}_parsed.json`;
             results.push({ filename: jsonName, type: 'csv-parsed', text: JSON.stringify(parsed) });
+          }
+          // For PDF, also emit parsed JSON metadata
+          if (isPdf(filename) && meta) {
+            const pdfJsonName = `${nameBase}_parsed.json`;
+            results.push({ filename: pdfJsonName, type: 'pdf-parsed', text: JSON.stringify(meta) });
+          }
+
+          // For any attachment with text, emit a structured JSON for better understanding
+          if (text && text.trim().length > 0) {
+            const docType = detectDocumentType(text);
+            const fields = extractKeyValues(text);
+            const tables = extractTables(text);
+            const structured = {
+              document_type: docType || null,
+              pages: meta?.numpages ?? undefined,
+              info: meta?.info ?? undefined,
+              text_preview: (text || '').slice(0, 2000),
+              // As requested: keep a section named 'text_previewer' with key-values and tables
+              text_previewer: {
+                fields,
+                tables
+              }
+            };
+            const structuredName = `${nameBase}_structured.json`;
+            results.push({ filename: structuredName, type: 'structured', text: JSON.stringify(structured) });
           }
         } catch (e) {
           results.push({ filename, error: e.message || 'Failed to process attachment' });

@@ -5,7 +5,8 @@ export default function Home() {
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [emailError, setEmailError] = useState("");
   // Email processing state
   const [provider, setProvider] = useState('Auto Detect');
   const [email, setEmail] = useState('');
@@ -17,15 +18,26 @@ export default function Home() {
   };
 
   const processEmails = async () => {
-    setError("");
+    setEmailError("");
     setLoading(true);
     setResults([]);
     try {
+      // Validations
+      if (!email || !password) {
+        throw new Error('Please enter Email and Password / App Password');
+      }
+      if (!String(email).includes('@')) {
+        throw new Error('Please enter a valid email address');
+      }
+      const d = Number(days) || 1;
+      if (d < 1) {
+        throw new Error('Days Back must be at least 1');
+      }
       const body = {
         provider,
         email,
         password,
-        days: Number(days) || 1
+        days: d
       };
       const res = await fetch('/api/email-ocr', {
         method: 'POST',
@@ -37,16 +49,16 @@ export default function Home() {
       setResults(data.results || []);
       setSelected(0);
     } catch (e) {
-      setError(e.message || 'Email processing failed');
+      setEmailError(e.message || 'Email processing failed');
     } finally {
       setLoading(false);
     }
   };
 
   const uploadAndOcr = async () => {
-    setError("");
+    setUploadError("");
     if (!files.length) {
-      setError("Please select at least one file");
+      setUploadError("Please select at least one file");
       return;
     }
     setLoading(true);
@@ -57,31 +69,35 @@ export default function Home() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setResults(data.results || []);
+      setSelected(0);
     } catch (e) {
-      setError(e.message || 'Upload failed');
+      setUploadError(e.message || 'Upload failed');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#0b1220', color: '#e6eefc', padding: '24px' }}>
-      <div style={{ maxWidth: 1100, margin: '0 auto' }}>
-        <h1 style={{ marginBottom: 8 }}>Google OCR (Vercel-ready)</h1>
-        <p style={{ marginTop: 0, opacity: 0.8 }}>Upload images or PDFs, or fetch mail attachments. Images use Google Cloud Vision; PDFs use pdf-parse locally.</p>
+    <div style={{ minHeight: '100vh', background: '#0b1220', color: '#e6eefc', padding: '32px' }}>
+      <div style={{ maxWidth: 1400, margin: '0 auto' }}>
+        <h1 style={{ marginBottom: 6 }}>Google OCR (Vercel-ready)</h1>
+        <p style={{ marginTop: 0, opacity: 0.8 }}>Upload files or fetch email attachments. Images use Google Cloud Vision; PDFs use fast serverless parsing. Results appear on the right.</p>
 
         <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
-          <div style={{ flex: '0 0 360px', display: 'grid', gap: 16 }}>
-            <div style={{ background: '#111a2c', padding: 16, borderRadius: 8 }}>
-              <h3 style={{ marginTop: 0 }}>Upload</h3>
+          <div style={{ flex: '0 0 420px', display: 'grid', gap: 16 }}>
+            <div style={{ background: '#111a2c', padding: 16, borderRadius: 12 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 4 }}>Upload (Manual)</h3>
+              <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 8 }}>Select local files. Images → Vision OCR. PDFs → parsed text. Multiple files allowed.</div>
               <input type="file" multiple onChange={onFilesChange} accept="image/*,application/pdf,.pdf" />
               <button onClick={uploadAndOcr} disabled={loading} style={{ marginTop: 12, padding: '10px 14px', background: '#2AA876', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer' }}>
                 {loading ? 'Processing…' : 'Process'}
               </button>
+              {uploadError && <div style={{ color: '#ff8080', marginTop: 8 }}>{uploadError}</div>}
             </div>
 
-            <div style={{ background: '#111a2c', padding: 16, borderRadius: 8 }}>
-              <h3 style={{ marginTop: 0 }}>Email Processing</h3>
+            <div style={{ background: '#111a2c', padding: 16, borderRadius: 12 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 4 }}>Email Processing (IMAP)</h3>
+              <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 8 }}>Fetch recent attachments from your mailbox. Use app passwords where required.</div>
               <label style={{ display: 'block', marginBottom: 6 }}>Email Provider</label>
               <select value={provider} onChange={e => setProvider(e.target.value)} style={{ width: '100%', marginBottom: 8 }}>
                 <option>Auto Detect</option>
@@ -101,19 +117,18 @@ export default function Home() {
               <button onClick={processEmails} disabled={loading} style={{ marginTop: 12, padding: '10px 14px', background: '#2AA876', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer' }}>
                 {loading ? 'Processing…' : 'Fetch & OCR Attachments'}
               </button>
+              {emailError && <div style={{ color: '#ff8080', marginTop: 8 }}>{emailError}</div>}
               <div style={{ opacity: 0.7, marginTop: 6, fontSize: 12 }}>Tip: For Gmail/Outlook with 2FA, use an app password.</div>
             </div>
-
-            {error && <div style={{ color: '#ff8080' }}>{error}</div>}
           </div>
 
-          <div style={{ flex: 1, background: '#111a2c', padding: 16, borderRadius: 8, minHeight: 520 }}>
+          <div style={{ flex: 1, background: '#111a2c', padding: 16, borderRadius: 12, minHeight: 600 }}>
             <h3 style={{ marginTop: 0 }}>Results</h3>
             {results.length === 0 && <div style={{ opacity: 0.7 }}>No results yet.</div>}
 
             {results.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 16 }}>
-                <div style={{ background: '#0e1729', borderRadius: 8, padding: 8, overflow: 'auto', maxHeight: 560 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gap: 16 }}>
+                <div style={{ background: '#0e1729', borderRadius: 8, padding: 8, overflow: 'auto', maxHeight: 680 }}>
                   {results.map((r, idx) => (
                     <button
                       key={idx}
@@ -134,7 +149,7 @@ export default function Home() {
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.filename}</span>
-                        <span style={{ opacity: 0.7, fontSize: 12 }}>{r.type || (r.error ? 'error' : '')}</span>
+                        <span style={{ opacity: 0.8, fontSize: 12, background: '#223257', padding: '2px 6px', borderRadius: 12 }}>{r.type || (r.error ? 'error' : '')}</span>
                       </div>
                       {r.error && <div style={{ color: '#ff8080', fontSize: 12 }}>{r.error}</div>}
                     </button>
