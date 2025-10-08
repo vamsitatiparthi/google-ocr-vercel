@@ -13,8 +13,27 @@ export const config = {
 };
 
 async function parseMultipart(req) {
-  // On Vercel, only /tmp is writable
-  // Use shared utilities from lib/ocr-utils.js
+  // Parse multipart/form-data using formidable and write to OS temp dir
+  return new Promise((resolve, reject) => {
+    const form = new IncomingForm({ multiples: true, keepExtensions: true, uploadDir: os.tmpdir() });
+    form.parse(req, (err, fields, files) => {
+      if (err) return reject(err);
+      const out = [];
+      // Support single file or multiple
+      const fileEntries = [];
+      for (const k of Object.keys(files || {})) {
+        const v = files[k];
+        if (Array.isArray(v)) fileEntries.push(...v);
+        else fileEntries.push(v);
+      }
+      for (const f of fileEntries) {
+        const filepath = f.filepath || f.path || f.pathName || f.newFilename || f.newname || f.name || f.tempFilePath || f.tmpPath || f.path;
+        const originalFilename = f.originalFilename || f.originalName || f.name || f.filename || f.newFilename || f.newname || path.basename(filepath || '') ;
+        out.push({ filepath, originalFilename });
+      }
+      resolve(out);
+    });
+  });
 }
 
 // helpers are provided by lib/ocr-utils.js

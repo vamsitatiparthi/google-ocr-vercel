@@ -81,7 +81,7 @@ export default function Home() {
   return (
     <div style={{ minHeight: '100vh', background: '#0b1220', color: '#e6eefc', padding: '32px' }}>
       <div style={{ maxWidth: 1400, margin: '0 auto' }}>
-        <h1 style={{ marginBottom: 6 }}>Google OCR (Vercel-ready)</h1>
+  <h1 style={{ marginBottom: 6 }}>Google OCR</h1>
         <p style={{ marginTop: 0, opacity: 0.8 }}>Upload files or fetch email attachments. Images use Google Cloud Vision; PDFs use fast serverless parsing. Results appear on the right.</p>
 
         <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
