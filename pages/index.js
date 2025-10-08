@@ -234,7 +234,8 @@ function ResultListItem({ r, idx, selected, onSelect, bold }) {
 function ResultPreview({ result }) {
   const content = useMemo(() => {
     if (!result) return { text: '', json: null };
-    const raw = result.text || '';
+    // New API uses `content` for JSON artifacts; fall back to `text` for backwards compatibility
+    const raw = (result.content !== undefined ? result.content : result.text) || '';
     // Try to parse as JSON if it looks like JSON
     const trimmed = raw.trim();
     if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']')))
@@ -293,23 +294,34 @@ function ResultPreview({ result }) {
 }
 
 function RichJsonView({ json, type }) {
-  // If invoice JSON, render key fields and items table
-  if (type === 'invoice' || (json.vendor_name || json.invoice_number || json.items)) {
+  // If invoice/universal JSON, render key fields and items table
+  const isInvoiceLike = type === 'invoice' || (json && (json.document_type === 'invoice' || json.metadata || json.items));
+  if (isInvoiceLike) {
+    // Support both legacy flat invoice JSON and new universal schema
+    const vendor = json.vendor_name || (json.metadata && json.metadata.vendor_name) || null;
+    const invoiceNumber = json.invoice_number || (json.metadata && json.metadata.invoice_number) || null;
+    const invoiceDate = json.invoice_date || (json.metadata && json.metadata.invoice_date) || null;
+    const dueDate = json.due_date || (json.metadata && json.metadata.due_date) || null;
+    const subtotal = (json.summary && json.summary.subtotal) || json.subtotal || null;
+    const tax = (json.summary && json.summary.tax) || json.tax || null;
+    const total = (json.summary && json.summary.total) || json.total || null;
+    const items = json.items || (json.orders && json.orders[0] && json.orders[0].items) || [];
+
     return (
       <div>
         <div style={{ marginBottom: 12 }}>
-          <KeyValueRow label="Vendor" value={json.vendor_name} />
-          <KeyValueRow label="Invoice #" value={json.invoice_number} />
-          <KeyValueRow label="Invoice Date" value={json.invoice_date} />
-          <KeyValueRow label="Due Date" value={json.due_date} />
-          <KeyValueRow label="Subtotal" value={fmtAmount(json.subtotal)} />
-          <KeyValueRow label="Tax" value={fmtAmount(json.tax)} />
-          <KeyValueRow label="Total" value={fmtAmount(json.total)} />
+          <KeyValueRow label="Vendor" value={vendor} />
+          <KeyValueRow label="Invoice #" value={invoiceNumber} />
+          <KeyValueRow label="Invoice Date" value={invoiceDate} />
+          <KeyValueRow label="Due Date" value={dueDate} />
+          <KeyValueRow label="Subtotal" value={fmtAmount(subtotal)} />
+          <KeyValueRow label="Tax" value={fmtAmount(tax)} />
+          <KeyValueRow label="Total" value={fmtAmount(total)} />
         </div>
-        {Array.isArray(json.items) && json.items.length > 0 && (
+        {Array.isArray(items) && items.length > 0 && (
           <div>
             <h4 style={{ marginTop: 0 }}>Items</h4>
-            <TableView headers={["description","quantity","rate","amount"]} rows={json.items} />
+            <TableView headers={["description","quantity","unit_price","amount"]} rows={items} />
           </div>
         )}
         <details style={{ marginTop: 12 }}>

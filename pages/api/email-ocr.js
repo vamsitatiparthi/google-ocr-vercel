@@ -168,29 +168,23 @@ export default async function handler(req, res) {
         const content = att.content; // Buffer
         try {
           // Always emit the original as a list item (no content to preview)
-          results.push({ filename, type: 'Original', text: '' });
+          results.push({ filename, type: 'Original' });
 
           const { type, text, meta } = await ocrBuffer(visionClient, content, filename);
 
-          // Emit extracted text as a generated file name
+          // Emit extracted text as a generated file name only as internal step; do not include raw text in API response
           const nameBase = baseName(filename);
-          const extractedName = `${nameBase}_extracted.txt`;
-          if (text && text.length > 0) {
-            results.push({ filename: extractedName, type, text });
-          } else {
-            results.push({ filename: extractedName, type, text: '' });
-          }
 
           // For CSV, also emit parsed JSON preview
           if (isCsv(filename)) {
             const parsed = csvPreviewJson(text || content.toString('utf-8'));
             const jsonName = `${nameBase}_parsed.json`;
-            results.push({ filename: jsonName, type: 'csv-parsed', text: JSON.stringify(parsed) });
+            results.push({ filename: jsonName, type: 'csv-parsed', content: JSON.stringify(parsed) });
           }
           // For PDF, also emit metadata JSON (separate from structured/invoice)
           if (isPdf(filename) && meta) {
             const pdfJsonName = `${nameBase}_metadata.json`;
-            results.push({ filename: pdfJsonName, type: 'pdf-metadata', text: JSON.stringify(meta) });
+            results.push({ filename: pdfJsonName, type: 'pdf-metadata', content: JSON.stringify(meta) });
           }
 
           // For any attachment with text, emit a structured JSON for better understanding
@@ -203,27 +197,25 @@ export default async function handler(req, res) {
               document_type: docType || null,
               pages: meta?.numpages ?? undefined,
               info: meta?.info ?? undefined,
-              text_preview: (text || '').slice(0, 2000),
-              // As requested: keep a section named 'text_previewer' with key-values and tables
               text_previewer: {
                 fields: { ...fields, ...inferred },
                 tables
               }
             };
             const structuredName = `${nameBase}_structured.json`;
-            results.push({ filename: structuredName, type: 'structured', text: JSON.stringify(structured) });
+            results.push({ filename: structuredName, type: 'structured', content: JSON.stringify(structured) });
 
             // Build invoice-specific JSON if invoice/bill-like content detected
             const invoice = buildInvoiceStructured(text);
             if (invoice && Object.keys(invoice).length > 1) {
               const invoiceName = `${nameBase}_invoice.json`;
-              results.push({ filename: invoiceName, type: 'invoice', text: JSON.stringify(invoice) });
+              results.push({ filename: invoiceName, type: 'invoice', content: JSON.stringify(invoice) });
             }
 
             // Emit universal JSON per user's schema
             const universal = buildUniversalStructured(text, meta || {});
             const universalName = `${nameBase}_universal.json`;
-            results.push({ filename: universalName, type: 'universal', text: JSON.stringify(universal) });
+            results.push({ filename: universalName, type: 'universal', content: JSON.stringify(universal) });
           }
         } catch (e) {
           results.push({ filename, error: e.message || 'Failed to process attachment' });

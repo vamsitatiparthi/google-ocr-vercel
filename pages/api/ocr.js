@@ -96,8 +96,8 @@ export default async function handler(req, res) {
     for (const file of files) {
       const { filepath, originalFilename } = file;
       try {
-        // Always emit the original file entry
-        results.push({ filename: originalFilename, type: 'Original', text: '' });
+  // Always emit the original file entry (no raw text included)
+  results.push({ filename: originalFilename, type: 'Original' });
 
         let text = '';
         let type = '';
@@ -138,18 +138,15 @@ export default async function handler(req, res) {
           type = 'binary';
         }
 
-        // Emit extracted text file name
-        const nameBase = baseName(originalFilename);
-        const extractedName = `${nameBase}_extracted.txt`;
-        results.push({ filename: extractedName, type, text });
+  const nameBase = baseName(originalFilename);
 
         // Emit parsed JSONs for CSV and PDF
         if (isCsv(originalFilename)) {
           const parsed = csvPreviewJson(text);
-          results.push({ filename: `${nameBase}_parsed.json`, type: 'csv-parsed', text: JSON.stringify(parsed) });
+          results.push({ filename: `${nameBase}_parsed.json`, type: 'csv-parsed', content: JSON.stringify(parsed) });
         }
         if (isPdf(originalFilename) && meta) {
-          results.push({ filename: `${nameBase}_metadata.json`, type: 'pdf-metadata', text: JSON.stringify(meta) });
+          results.push({ filename: `${nameBase}_metadata.json`, type: 'pdf-metadata', content: JSON.stringify(meta) });
         }
 
         // Emit structured JSON for any text content
@@ -168,17 +165,17 @@ export default async function handler(req, res) {
               tables
             }
           };
-          results.push({ filename: `${nameBase}_structured.json`, type: 'structured', text: JSON.stringify(structured) });
+          results.push({ filename: `${nameBase}_structured.json`, type: 'structured', content: JSON.stringify(structured) });
 
           // Emit invoice-focused JSON when applicable
           const invoice = buildInvoiceStructured(text);
           if (invoice && Object.keys(invoice).length > 1) {
-            results.push({ filename: `${nameBase}_invoice.json`, type: 'invoice', text: JSON.stringify(invoice) });
+            results.push({ filename: `${nameBase}_invoice.json`, type: 'invoice', content: JSON.stringify(invoice) });
           }
 
-          // Emit universal JSON per user's schema
+          // Emit universal JSON per user's schema (strict - no raw text)
           const universal = buildUniversalStructured(text, meta || {});
-          results.push({ filename: `${nameBase}_universal.json`, type: 'universal', text: JSON.stringify(universal) });
+          results.push({ filename: `${nameBase}_universal.json`, type: 'universal', content: JSON.stringify(universal) });
         }
       } catch (e) {
         results.push({ filename: originalFilename, error: e.message || 'Failed to process' });
