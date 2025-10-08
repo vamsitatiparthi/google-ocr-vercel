@@ -350,10 +350,10 @@ export default async function handler(req, res) {
             const jsonName = `${nameBase}_parsed.json`;
             results.push({ filename: jsonName, type: 'csv-parsed', text: JSON.stringify(parsed) });
           }
-          // For PDF, also emit parsed JSON metadata
+          // For PDF, also emit metadata JSON (separate from structured/invoice)
           if (isPdf(filename) && meta) {
-            const pdfJsonName = `${nameBase}_parsed.json`;
-            results.push({ filename: pdfJsonName, type: 'pdf-parsed', text: JSON.stringify(meta) });
+            const pdfJsonName = `${nameBase}_metadata.json`;
+            results.push({ filename: pdfJsonName, type: 'pdf-metadata', text: JSON.stringify(meta) });
           }
 
           // For any attachment with text, emit a structured JSON for better understanding

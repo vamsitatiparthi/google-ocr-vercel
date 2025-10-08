@@ -319,7 +319,7 @@ export default async function handler(req, res) {
           results.push({ filename: `${nameBase}_parsed.json`, type: 'csv-parsed', text: JSON.stringify(parsed) });
         }
         if (isPdf(originalFilename) && meta) {
-          results.push({ filename: `${nameBase}_parsed.json`, type: 'pdf-parsed', text: JSON.stringify(meta) });
+          results.push({ filename: `${nameBase}_metadata.json`, type: 'pdf-metadata', text: JSON.stringify(meta) });
         }
 
         // Emit structured JSON for any text content

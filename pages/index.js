@@ -4,6 +4,7 @@ export default function Home() {
   const [files, setFiles] = useState([]);
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(0);
+  const [groupedView, setGroupedView] = useState(true);
   const [loading, setLoading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [emailError, setEmailError] = useState("");
@@ -123,37 +124,24 @@ export default function Home() {
           </div>
 
           <div style={{ flex: 1, background: '#111a2c', padding: 16, borderRadius: 12, minHeight: 600 }}>
-            <h3 style={{ marginTop: 0 }}>Results</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>Results</h3>
+              <label style={{ fontSize: 13, opacity: 0.85 }}>
+                <input type="checkbox" checked={groupedView} onChange={e=>setGroupedView(e.target.checked)} style={{ marginRight: 6 }} />
+                Group by Original
+              </label>
+            </div>
             {results.length === 0 && <div style={{ opacity: 0.7 }}>No results yet.</div>}
 
             {results.length > 0 && (
               <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gap: 16 }}>
                 <div style={{ background: '#0e1729', borderRadius: 8, padding: 8, overflow: 'auto', maxHeight: 680 }}>
-                  {results.map((r, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelected(idx)}
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        textAlign: 'left',
-                        border: 'none',
-                        background: idx === selected ? '#1a2340' : 'transparent',
-                        color: '#e6eefc',
-                        padding: '10px 12px',
-                        borderRadius: 6,
-                        cursor: 'pointer',
-                        marginBottom: 6
-                      }}
-                      title={r.filename}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.filename}</span>
-                        <span style={{ opacity: 0.8, fontSize: 12, background: '#223257', padding: '2px 6px', borderRadius: 12 }}>{r.type || (r.error ? 'error' : '')}</span>
-                      </div>
-                      {r.error && <div style={{ color: '#ff8080', fontSize: 12 }}>{r.error}</div>}
-                    </button>
-                  ))}
+                  <ResultList
+                    results={results}
+                    selected={selected}
+                    onSelect={setSelected}
+                    grouped={groupedView}
+                  />
                 </div>
 
                 <ResultPreview result={results[selected]} />
@@ -163,6 +151,83 @@ export default function Home() {
         </div>
       </div>
     </div>
+  );
+}
+
+function baseName(name = '') {
+  const i = (name || '').lastIndexOf('.');
+  return i >= 0 ? name.slice(0, i) : name;
+}
+
+function ResultList({ results, selected, onSelect, grouped }) {
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const b = baseName(r.filename || '');
+      if (!map.has(b)) map.set(b, []);
+      map.get(b).push({ idx: i, item: r });
+    }
+    return map;
+  }, [results]);
+
+  if (!grouped) {
+    return (
+      <div>
+        {results.map((r, idx) => (
+          <ResultListItem key={idx} r={r} idx={idx} selected={selected} onSelect={onSelect} />
+        ))}
+      </div>
+    );
+  }
+
+  // Grouped rendering: first show the Original if present, then others
+  const entries = Array.from(groups.entries());
+  return (
+    <div>
+      {entries.map(([groupName, arr]) => {
+        const original = arr.find(x => x.item.type === 'Original') || arr[0];
+        const children = arr.filter(x => x !== original);
+        return (
+          <div key={groupName} style={{ marginBottom: 10 }}>
+            <ResultListItem r={original.item} idx={original.idx} selected={selected} onSelect={onSelect} bold />
+            <div style={{ marginLeft: 10 }}>
+              {children.map(({ item, idx }) => (
+                <ResultListItem key={idx} r={item} idx={idx} selected={selected} onSelect={onSelect} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ResultListItem({ r, idx, selected, onSelect, bold }) {
+  return (
+    <button
+      onClick={() => onSelect(idx)}
+      style={{
+        display: 'block',
+        width: '100%',
+        textAlign: 'left',
+        border: 'none',
+        background: idx === selected ? '#1a2340' : 'transparent',
+        color: '#e6eefc',
+        padding: '10px 12px',
+        borderRadius: 6,
+        cursor: 'pointer',
+        marginBottom: 6,
+        fontWeight: bold ? 700 : 500
+      }}
+      title={r.filename}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.filename}</span>
+        <span style={{ opacity: 0.9, fontSize: 12, background: '#223257', padding: '2px 6px', borderRadius: 12 }}>{r.type || (r.error ? 'error' : '')}</span>
+      </div>
+      {r.error && <div style={{ color: '#ff8080', fontSize: 12 }}>{r.error}</div>}
+    </button>
   );
 }
 
@@ -219,12 +284,114 @@ function ResultPreview({ result }) {
       {result.error ? (
         <div style={{ color: '#ff8080' }}>{result.error}</div>
       ) : content.json ? (
-        <pre style={preStyle}>{JSON.stringify(content.json, null, 2)}</pre>
+        <RichJsonView json={content.json} type={result.type} />
       ) : (
         <pre style={preStyle}>{content.text?.slice(0, 200000) || ''}</pre>
       )}
     </div>
   );
+}
+
+function RichJsonView({ json, type }) {
+  // If invoice JSON, render key fields and items table
+  if (type === 'invoice' || (json.vendor_name || json.invoice_number || json.items)) {
+    return (
+      <div>
+        <div style={{ marginBottom: 12 }}>
+          <KeyValueRow label="Vendor" value={json.vendor_name} />
+          <KeyValueRow label="Invoice #" value={json.invoice_number} />
+          <KeyValueRow label="Invoice Date" value={json.invoice_date} />
+          <KeyValueRow label="Due Date" value={json.due_date} />
+          <KeyValueRow label="Subtotal" value={fmtAmount(json.subtotal)} />
+          <KeyValueRow label="Tax" value={fmtAmount(json.tax)} />
+          <KeyValueRow label="Total" value={fmtAmount(json.total)} />
+        </div>
+        {Array.isArray(json.items) && json.items.length > 0 && (
+          <div>
+            <h4 style={{ marginTop: 0 }}>Items</h4>
+            <TableView headers={["description","quantity","rate","amount"]} rows={json.items} />
+          </div>
+        )}
+        <details style={{ marginTop: 12 }}>
+          <summary>Raw JSON</summary>
+          <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
+        </details>
+      </div>
+    );
+  }
+
+  // If structured JSON with text_previewer, show fields and the first table nicely
+  if (json && json.text_previewer) {
+    const fields = json.text_previewer.fields || {};
+    const tables = json.text_previewer.tables || [];
+    return (
+      <div>
+        <h4 style={{ marginTop: 0 }}>Detected Fields</h4>
+        <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr', gap: 8 }}>
+          {Object.entries(fields).map(([k,v]) => (
+            <>
+              <div style={{ opacity: 0.8 }}>{k}</div>
+              <div style={{ wordBreak: 'break-word' }}>{String(v)}</div>
+            </>
+          ))}
+        </div>
+        {tables.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <h4>Detected Table</h4>
+            <TableView headers={tables[0].headers || []} rows={tables[0].rows || []} />
+          </div>
+        )}
+        <details style={{ marginTop: 12 }}>
+          <summary>Raw JSON</summary>
+          <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
+        </details>
+      </div>
+    );
+  }
+
+  // Fallback pretty JSON
+  return <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>;
+}
+
+function TableView({ headers, rows }) {
+  const keys = headers && headers.length ? headers : Array.from(rows[0] ? Object.keys(rows[0]) : []);
+  return (
+    <div style={{ overflow: 'auto', border: '1px solid #223257', borderRadius: 8 }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>
+            {keys.map((h,i)=> (
+              <th key={i} style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid #223257' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 500).map((r,ri)=> (
+            <tr key={ri}>
+              {keys.map((k,ki)=> (
+                <td key={ki} style={{ padding: '8px 10px', borderBottom: '1px solid #1a2340', verticalAlign: 'top' }}>{String(r[k] ?? '')}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function KeyValueRow({ label, value }) {
+  if (value == null || value === '') return null;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: 8, margin: '4px 0' }}>
+      <div style={{ opacity: 0.8 }}>{label}</div>
+      <div>{String(value)}</div>
+    </div>
+  );
+}
+
+function fmtAmount(v) {
+  if (typeof v !== 'number') return v;
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 const btnStyle = {
