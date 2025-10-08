@@ -21,6 +21,142 @@ function mapProvider(provider, email) {
     return { host: `imap.${domain}`, port: 993, secure: true };
   }
 
+// UNIVERSAL post-processor per user's schema
+function normalizeAmount(s) {
+  if (s == null) return undefined;
+  const n = String(s).replace(/[^0-9.,-]/g, '').replace(/,(?=\d{3}(\D|$))/g, '').replace(/,/g, '.');
+  const v = parseFloat(n);
+  return isNaN(v) ? undefined : v;
+}
+
+function normalizeDate(s) {
+  if (!s) return undefined;
+  const t = String(s).trim().replace(/\./g, '/').replace(/-/g, '/');
+  const m = t.match(/(\d{1,4})[\/](\d{1,2})[\/](\d{1,4})/);
+  if (!m) return undefined;
+  let a = m[1], b = m[2], c = m[3];
+  // If first is year
+  if (a.length === 4) { const y = a; a = b; b = c; c = y; }
+  if (c.length === 2) c = '20' + c;
+  a = a.padStart(2, '0'); b = b.padStart(2, '0');
+  return `${c}-${a}-${b}`; // YYYY-MM-DD
+}
+
+function buildUniversalStructured(text = '', meta = {}) {
+  const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const raw_text = text || '';
+  const producer = (meta?.info?.Producer) || meta?.info?.producer || undefined;
+  const created_at = normalizeDate(meta?.info?.CreationDate?.replace(/^D:/, '')) || undefined;
+
+  // Document type
+  const dt = (detectDocumentType(text) || 'unknown').toLowerCase().replace(/\s+/g, '_');
+
+  // Key-Value pairs
+  const kv = [];
+  const kvRe = /^(?<key>[A-Za-z0-9 _#\/\-\.]+)\s*[:\-]\s*(?<val>.+)$/;
+  for (const l of lines) {
+    const m = l.match(kvRe);
+    if (m && m.groups) kv.push({ key: m.groups.key.trim(), value: m.groups.val.trim() });
+  }
+
+  // Amounts and currency
+  const moneyRe = /([€$₹])?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?/g;
+  let currency = undefined; let subtotal, tax, total;
+  for (const l of lines) {
+    const arr = l.match(moneyRe) || [];
+    if (arr.length) {
+      if (!currency) {
+        const m = l.match(/[€$₹]/); if (m) currency = m[0];
+      }
+      if (/\bsub\s*total\b/i.test(l)) subtotal = normalizeAmount(arr[arr.length - 1]);
+      if (/\b(tax|gst|vat)\b/i.test(l)) tax = normalizeAmount(arr[arr.length - 1]);
+      if (/\btotal\b/i.test(l)) total = normalizeAmount(arr[arr.length - 1]);
+    }
+  }
+  if (total == null) {
+    const amounts = (raw_text.match(moneyRe) || []).map(normalizeAmount).filter(v => typeof v === 'number');
+    if (amounts.length) total = Math.max(...amounts);
+  }
+
+  // Dates
+  const dateCand = lines.flatMap(l => (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g) || []).map(normalizeDate)).filter(Boolean);
+  let invoice_date, due_date, ship_date;
+  for (const l of lines) {
+    const d = (l.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/) || [])[0];
+    if (!d) continue;
+    const nd = normalizeDate(d);
+    if (!invoice_date && /invoice\s*date/i.test(l)) invoice_date = nd;
+    if (!due_date && /due\s*date/i.test(l)) due_date = nd;
+    if (!ship_date && /ship\s*date/i.test(l)) ship_date = nd;
+  }
+  if (!invoice_date) invoice_date = dateCand[0];
+
+  // Numbers
+  const findFirst = (regex) => {
+    for (const l of lines) { const m = l.match(regex); if (m) return m[1] || m[0]; }
+    return undefined;
+  };
+  const invoice_number = findFirst(/invoice\s*(number|no\.?|#)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i) || findFirst(/#\s*([A-Za-z0-9\-]{4,})/i);
+  const order_number = findFirst(/\b(?:SO|PO|Order)\s*#?\s*([A-Za-z0-9\-]+)/i);
+
+  // Vendor name heuristic
+  let vendor_name;
+  const invIdx = lines.findIndex(l => /\b(invoice|bill|statement|order)\b/i.test(l));
+  if (invIdx > 0) vendor_name = lines[Math.max(0, invIdx - 1)];
+  if (!vendor_name && lines[0] && lines[0].length <= 64) vendor_name = lines[0];
+
+  // Items and Orders (simple aggregation)
+  const items = extractTables(text).flatMap(t => t.rows || []);
+  const orders = [];
+  if (order_number) {
+    orders.push({
+      order_number,
+      po_number: findFirst(/\bPO\s*#?\s*([A-Za-z0-9\-]+)/i),
+      customer: { name: undefined, address: undefined, country: undefined },
+      freight_terms: findFirst(/\bterms?\b[:\-]?\s*(.+)/i),
+      carrier: findFirst(/\bcarrier\b[:\-]?\s*(.+)/i),
+      ship_via: findFirst(/\bship\s*via\b[:\-]?\s*(.+)/i),
+      shipping_notes: undefined,
+      items: items.map(r => ({
+        item_code: r.item_code || r.code || undefined,
+        upc: r.upc || undefined,
+        description: r.description || r.item || r.name || undefined,
+        quantity: normalizeAmount(r.quantity) || undefined,
+        rate: normalizeAmount(r.rate) || undefined,
+        amount: normalizeAmount(r.amount) || undefined,
+      })),
+      total
+    });
+  }
+
+  // Build universal JSON
+  const universal = {
+    metadata: {
+      numpages: meta?.numpages ?? undefined,
+      producer: producer ?? undefined,
+      created_at: created_at ?? undefined,
+    },
+    document_type: dt || 'unknown',
+    document_summary: {
+      vendor_name: vendor_name ?? undefined,
+      invoice_number: invoice_number ?? undefined,
+      order_number: order_number ?? undefined,
+      invoice_date: invoice_date ?? undefined,
+      due_date: due_date ?? undefined,
+      ship_date: ship_date ?? undefined,
+      subtotal: subtotal ?? undefined,
+      tax: tax ?? undefined,
+      total: total ?? undefined,
+      currency: currency ?? undefined,
+    },
+    orders,
+    key_value_pairs: kv,
+    unstructured_values: [],
+    raw_text,
+  };
+  return universal;
+}
+
 // Build invoice/bill structured JSON from raw OCR text
 function buildInvoiceStructured(text = '') {
   const out = {};
@@ -381,6 +517,11 @@ export default async function handler(req, res) {
               const invoiceName = `${nameBase}_invoice.json`;
               results.push({ filename: invoiceName, type: 'invoice', text: JSON.stringify(invoice) });
             }
+
+            // Emit universal JSON per user's schema
+            const universal = buildUniversalStructured(text, meta || {});
+            const universalName = `${nameBase}_universal.json`;
+            results.push({ filename: universalName, type: 'universal', text: JSON.stringify(universal) });
           }
         } catch (e) {
           results.push({ filename, error: e.message || 'Failed to process attachment' });
