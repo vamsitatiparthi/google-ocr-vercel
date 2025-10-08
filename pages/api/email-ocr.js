@@ -187,35 +187,11 @@ export default async function handler(req, res) {
             results.push({ filename: pdfJsonName, type: 'pdf-metadata', content: JSON.stringify(meta) });
           }
 
-          // For any attachment with text, emit a structured JSON for better understanding
+          // For any attachment with text, emit a single structured JSON (universal schema)
           if (text && text.trim().length > 0) {
-            const docType = detectDocumentType(text);
-            const { fields, loose } = extractKeyValues(text);
-            const inferred = inferLooseValues(loose, fields);
-            const tables = extractTables(text);
-            const structured = {
-              document_type: docType || null,
-              pages: meta?.numpages ?? undefined,
-              info: meta?.info ?? undefined,
-              text_previewer: {
-                fields: { ...fields, ...inferred },
-                tables
-              }
-            };
-            const structuredName = `${nameBase}_structured.json`;
-            results.push({ filename: structuredName, type: 'structured', content: JSON.stringify(structured) });
-
-            // Build invoice-specific JSON if invoice/bill-like content detected
-            const invoice = buildInvoiceStructured(text);
-            if (invoice && Object.keys(invoice).length > 1) {
-              const invoiceName = `${nameBase}_invoice.json`;
-              results.push({ filename: invoiceName, type: 'invoice', content: JSON.stringify(invoice) });
-            }
-
-            // Emit universal JSON per user's schema
             const universal = buildUniversalStructured(text, meta || {});
-            const universalName = `${nameBase}_universal.json`;
-            results.push({ filename: universalName, type: 'universal', content: JSON.stringify(universal) });
+            const structuredName = `${nameBase}_structured.json`;
+            results.push({ filename: structuredName, type: 'structured', content: JSON.stringify(universal) });
           }
         } catch (e) {
           results.push({ filename, error: e.message || 'Failed to process attachment' });

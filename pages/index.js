@@ -293,76 +293,156 @@ function ResultPreview({ result }) {
   );
 }
 
-function RichJsonView({ json, type }) {
-  // If invoice/universal JSON, render key fields and items table
-  const isInvoiceLike = type === 'invoice' || (json && (json.document_type === 'invoice' || json.metadata || json.items));
-  if (isInvoiceLike) {
-    // Support both legacy flat invoice JSON and new universal schema
-    const vendor = json.vendor_name || (json.metadata && json.metadata.vendor_name) || null;
-    const invoiceNumber = json.invoice_number || (json.metadata && json.metadata.invoice_number) || null;
-    const invoiceDate = json.invoice_date || (json.metadata && json.metadata.invoice_date) || null;
-    const dueDate = json.due_date || (json.metadata && json.metadata.due_date) || null;
-    const subtotal = (json.summary && json.summary.subtotal) || json.subtotal || null;
-    const tax = (json.summary && json.summary.tax) || json.tax || null;
-    const total = (json.summary && json.summary.total) || json.total || null;
-    const items = json.items || (json.orders && json.orders[0] && json.orders[0].items) || [];
+function RichJsonView({ json }) {
+  // We only display the new structured JSON shape
+  const items = json.items || [];
+  const kv = json.key_value_pairs || [];
+  const parsing = json.parsing_options || {};
+  const validation = json.validation || { valid: true, warnings: [] };
+  const [remap, setRemap] = useState(null);
+  const [lastAppliedRemap, setLastAppliedRemap] = useState(null);
 
-    return (
-      <div>
-        <div style={{ marginBottom: 12 }}>
-          <KeyValueRow label="Vendor" value={vendor} />
-          <KeyValueRow label="Invoice #" value={invoiceNumber} />
-          <KeyValueRow label="Invoice Date" value={invoiceDate} />
-          <KeyValueRow label="Due Date" value={dueDate} />
-          <KeyValueRow label="Subtotal" value={fmtAmount(subtotal)} />
-          <KeyValueRow label="Tax" value={fmtAmount(tax)} />
-          <KeyValueRow label="Total" value={fmtAmount(total)} />
-        </div>
-        {Array.isArray(items) && items.length > 0 && (
-          <div>
-            <h4 style={{ marginTop: 0 }}>Items</h4>
-            <TableView headers={["description","quantity","unit_price","amount"]} rows={items} />
-          </div>
-        )}
-        <details style={{ marginTop: 12 }}>
-          <summary>Raw JSON</summary>
-          <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
-        </details>
+  // If parsing suggests column roles, allow user to remap columns
+  const colRoles = (parsing.suggestions && parsing.suggestions[0] && parsing.suggestions[0].column_roles) || null;
+  const headers = json.parsing_options && json.parsing_options.detected_table_type === 'education' ? ['qualification','school','cgpa','year'] : null;
+
+  const applyRemap = (map) => {
+    setRemap(map);
+    setLastAppliedRemap(map);
+  };
+
+  // Remapped rows for preview
+  const remappedRows = useMemo(() => {
+    if (!remap || !Array.isArray(items)) return items;
+    // remap each item based on user mapping (map: target->source index)
+    return items.map(it => {
+      const out = {};
+      Object.keys(remap).forEach(k => {
+        const src = remap[k];
+        out[k] = Array.isArray(it) ? (it[src] || '') : (it[k] || it[Object.keys(it)[src]] || '');
+      });
+      return out;
+    });
+  }, [remap, items]);
+
+  return (
+    <div>
+      <h4 style={{ marginTop: 0 }}>Structured Result</h4>
+      <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr', gap: 8 }}>
+        {kv.map(kvItem => (
+          <>
+            <div style={{ opacity: 0.8 }}>{kvItem.key}</div>
+            <div>{String(kvItem.value)}</div>
+          </>
+        ))}
       </div>
-    );
-  }
 
-  // If structured JSON with text_previewer, show fields and the first table nicely
-  if (json && json.text_previewer) {
-    const fields = json.text_previewer.fields || {};
-    const tables = json.text_previewer.tables || [];
-    return (
-      <div>
-        <h4 style={{ marginTop: 0 }}>Detected Fields</h4>
-        <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr', gap: 8 }}>
-          {Object.entries(fields).map(([k,v]) => (
-            <>
-              <div style={{ opacity: 0.8 }}>{k}</div>
-              <div style={{ wordBreak: 'break-word' }}>{String(v)}</div>
-            </>
-          ))}
-        </div>
-        {tables.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <h4>Detected Table</h4>
-            <TableView headers={tables[0].headers || []} rows={tables[0].rows || []} />
-          </div>
-        )}
-        <details style={{ marginTop: 12 }}>
-          <summary>Raw JSON</summary>
-          <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
-        </details>
+      <div style={{ marginTop: 12 }}>
+        <strong>Parsing Options</strong>
+        <div style={{ opacity: 0.8, marginTop: 6 }}>{JSON.stringify(parsing, null, 2)}</div>
       </div>
-    );
-  }
 
-  // Fallback pretty JSON
-  return <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>;
+      <div style={{ marginTop: 12 }}>
+        <strong>Validation</strong>
+        <div style={{ color: validation.valid ? '#8fd19e' : '#ffb3b3' }}>{validation.valid ? 'OK' : 'Warnings'}</div>
+        {!validation.valid && <pre style={preStyle}>{JSON.stringify(validation.warnings, null, 2)}</pre>}
+      </div>
+
+      {colRoles && (
+        <div style={{ marginTop: 12 }}>
+          <h4>Column Mapper (suggested)</h4>
+          <div style={{ opacity: 0.8 }}>Detected roles: {colRoles.join(', ')}</div>
+          <ColumnMapper roles={colRoles} onApply={applyRemap} detectedType={parsing.detected_table_type} />
+        </div>
+      )}
+
+      {Array.isArray(remappedRows) && remappedRows.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <h4>Items (preview)</h4>
+          <TableView headers={headers || Object.keys(remappedRows[0] || {})} rows={remappedRows} />
+          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+            <button onClick={() => exportRemapped(json, lastAppliedRemap)} style={btnStyle}>Export Remapped .json</button>
+          </div>
+        </div>
+      )}
+
+      <details style={{ marginTop: 12 }}>
+        <summary>Raw JSON</summary>
+        <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+function ColumnMapper({ roles, detectedType, onApply }) {
+  // roles: array of detected roles per column (e.g., ['text','cgpa','year'])
+  const [mapping, setMapping] = useState({});
+  const targets = detectedType === 'education' ? ['qualification','school','cgpa','year'] : ['description','quantity','unit_price','amount'];
+
+  const handleChange = (target, idx) => {
+    setMapping(m => ({ ...m, [target]: Number(idx) }));
+  };
+
+  return (
+    <div style={{ background: '#0e1729', padding: 10, borderRadius: 8 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: 8 }}>
+        {targets.map((t, i) => (
+          <div key={t} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ width: 160 }}>{t}</div>
+            <select onChange={e => handleChange(t, e.target.value)} style={{ flex: 1 }}>
+              <option value="">(auto)</option>
+              {roles.map((r, idx) => <option key={idx} value={idx}>{idx}: {r}</option>)}
+            </select>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+        <button onClick={() => onApply(mapping)} style={btnStyle}>Apply Mapping</button>
+        <button onClick={() => { setMapping({}); onApply(null); }} style={{ ...btnStyle, background: '#666' }}>Clear</button>
+      </div>
+    </div>
+  );
+}
+
+function exportRemapped(json, mapping) {
+  // mapping: target->source index
+  try {
+    const out = JSON.parse(JSON.stringify(json || {}));
+    if (!mapping || !out.items || !Array.isArray(out.items)) {
+      // nothing to do; trigger download of original
+      downloadBlob(JSON.stringify(out, null, 2), (out.filename || 'structured') + '_remapped.json');
+      return;
+    }
+    // Build remapped items array
+    const remapped = out.items.map(it => {
+      // if item is array-like, index into it; if object-like, try to grab keys
+      const isArr = Array.isArray(it);
+      const result = {};
+      Object.keys(mapping).forEach(target => {
+        const srcIdx = mapping[target];
+        if (srcIdx === undefined || srcIdx === null || srcIdx === '') return;
+        const v = isArr ? (it[srcIdx] ?? '') : (it[target] ?? Object.values(it)[srcIdx] ?? '');
+        result[target] = v;
+      });
+      return result;
+    });
+    out.items = remapped;
+    downloadBlob(JSON.stringify(out, null, 2), (out.filename || 'structured') + '_remapped.json');
+  } catch (e) {
+    alert('Export failed: ' + (e && e.message));
+  }
+}
+
+function downloadBlob(text, filename) {
+  const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function TableView({ headers, rows }) {

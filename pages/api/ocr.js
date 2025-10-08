@@ -159,42 +159,15 @@ export default async function handler(req, res) {
 
   const nameBase = baseName(originalFilename);
 
-        // Emit parsed JSONs for CSV and PDF
+        // Emit parsed JSONs for CSV and structured JSON for any text content
         if (isCsv(originalFilename)) {
           const parsed = csvPreviewJson(text);
           results.push({ filename: `${nameBase}_parsed.json`, type: 'csv-parsed', content: JSON.stringify(parsed) });
         }
-        if (isPdf(originalFilename) && meta) {
-          results.push({ filename: `${nameBase}_metadata.json`, type: 'pdf-metadata', content: JSON.stringify(meta) });
-        }
-
-        // Emit structured JSON for any text content
         if (text && text.trim().length > 0) {
-          const { fields, loose } = extractKeyValues(text);
-          const inferred = inferLooseValues(loose, fields);
-          const tables = extractTables(text);
-          const docType = detectDocumentType(text);
-          const structured = {
-            document_type: docType || null,
-            pages: meta?.numpages ?? undefined,
-            info: meta?.info ?? undefined,
-            text_preview: (text||'').slice(0,2000),
-            text_previewer: {
-              fields: { ...fields, ...inferred },
-              tables
-            }
-          };
-          results.push({ filename: `${nameBase}_structured.json`, type: 'structured', content: JSON.stringify(structured) });
-
-          // Emit invoice-focused JSON when applicable
-          const invoice = buildInvoiceStructured(text);
-          if (invoice && Object.keys(invoice).length > 1) {
-            results.push({ filename: `${nameBase}_invoice.json`, type: 'invoice', content: JSON.stringify(invoice) });
-          }
-
-          // Emit universal JSON per user's schema (strict - no raw text)
           const universal = buildUniversalStructured(text, meta || {});
-          results.push({ filename: `${nameBase}_universal.json`, type: 'universal', content: JSON.stringify(universal) });
+          // only emit a single structured JSON file per upload (named *_structured.json)
+          results.push({ filename: `${nameBase}_structured.json`, type: 'structured', content: JSON.stringify(universal) });
         }
       } catch (e) {
         results.push({ filename: originalFilename, error: e.message || 'Failed to process' });
