@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 
 export default function Home() {
   const [files, setFiles] = useState([]);
@@ -30,85 +30,169 @@ export default function Home() {
       if (!String(email).includes('@')) {
         throw new Error('Please enter a valid email address');
       }
-      const d = Number(days) || 1;
-      if (d < 1) {
-        throw new Error('Days Back must be at least 1');
-      }
-      const body = {
-        provider,
-        email,
-        password,
-        days: d
-      };
-      const res = await fetch('/api/email-ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setResults(data.results || []);
-      setSelected(0);
-    } catch (e) {
-      setEmailError(e.message || 'Email processing failed');
-    } finally {
-      setLoading(false);
-    }
-  };
+      function RichJsonView({ json }) {
+        // editable copy of JSON for user customizations
+        const [current, setCurrent] = useState(() => JSON.parse(JSON.stringify(json || {})));
+        useEffect(() => setCurrent(JSON.parse(JSON.stringify(json || {}))), [json]);
 
-  const uploadAndOcr = async () => {
-    setUploadError("");
-    if (!files.length) {
-      setUploadError("Please select at least one file");
-      return;
-    }
-    setLoading(true);
-    try {
-      const form = new FormData();
-      files.forEach((f) => form.append('files', f));
-      const res = await fetch('/api/ocr', { method: 'POST', body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setResults(data.results || []);
-      setSelected(0);
-    } catch (e) {
-      setUploadError(e.message || 'Upload failed');
-    } finally {
-      setLoading(false);
-    }
-  };
+        const parsing = current.parsing_options || {};
+        const validation = current.validation || { valid: true, warnings: [] };
 
-  return (
-    <div style={{ minHeight: '100vh', background: '#0b1220', color: '#e6eefc', padding: '32px' }}>
-      <div style={{ maxWidth: 1400, margin: '0 auto' }}>
-  <h1 style={{ marginBottom: 6 }}>Google OCR</h1>
-        <p style={{ marginTop: 0, opacity: 0.8 }}>Upload files or fetch email attachments. Images use Google Cloud Vision; PDFs use fast serverless parsing. Results appear on the right.</p>
+        const updateKV = (idx, field, value) => {
+          const kv = Array.isArray(current.key_value_pairs) ? [...current.key_value_pairs] : [];
+          kv[idx] = { ...(kv[idx] || {}), [field]: value };
+          setCurrent(c => ({ ...c, key_value_pairs: kv }));
+        };
+        const removeKV = (idx) => {
+          const kv = Array.isArray(current.key_value_pairs) ? [...current.key_value_pairs] : [];
+          kv.splice(idx, 1);
+          setCurrent(c => ({ ...c, key_value_pairs: kv }));
+        };
+        const addKV = () => {
+          const kv = Array.isArray(current.key_value_pairs) ? [...current.key_value_pairs] : [];
+          kv.push({ key: '', value: '' });
+          setCurrent(c => ({ ...c, key_value_pairs: kv }));
+        };
 
-        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
-          <div style={{ flex: '0 0 420px', display: 'grid', gap: 16 }}>
-            <div style={{ background: '#111a2c', padding: 16, borderRadius: 12 }}>
-              <h3 style={{ marginTop: 0, marginBottom: 4 }}>Upload (Manual)</h3>
-              <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 8 }}>Select local files. Images → Vision OCR. PDFs → parsed text. Multiple files allowed.</div>
-              <input type="file" multiple onChange={onFilesChange} accept="image/*,application/pdf,.pdf" />
-              <button onClick={uploadAndOcr} disabled={loading} style={{ marginTop: 12, padding: '10px 14px', background: '#2AA876', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer' }}>
-                {loading ? 'Processing…' : 'Process'}
-              </button>
-              {uploadError && <div style={{ color: '#ff8080', marginTop: 8 }}>{uploadError}</div>}
+        const updateTableCell = (tableIdx, rowIdx, colIdx, value) => {
+          const tabs = (current.tables || []).map(t => ({ ...t }));
+          const t = tabs[tableIdx];
+          if (!t) return;
+          t.raw_data = t.raw_data || [];
+          t.raw_data[rowIdx] = t.raw_data[rowIdx] || Array(t.columns || 0).fill('');
+          t.raw_data[rowIdx][colIdx] = value;
+          tabs[tableIdx] = t;
+          setCurrent(c => ({ ...c, tables: tabs }));
+        };
+        const removeTableRow = (tableIdx, rowIdx) => {
+          const tabs = (current.tables || []).map(t => ({ ...t }));
+          const t = tabs[tableIdx]; if (!t) return;
+          t.raw_data = t.raw_data || [];
+          t.raw_data.splice(rowIdx, 1);
+          tabs[tableIdx] = t; setCurrent(c => ({ ...c, tables: tabs }));
+        };
+        const addTableRow = (tableIdx) => {
+          const tabs = (current.tables || []).map(t => ({ ...t }));
+          const t = tabs[tableIdx]; if (!t) return;
+          const cols = t.columns || (t.headers ? t.headers.length : (t.raw_data[0] || []).length || 0);
+          t.raw_data = t.raw_data || [];
+          t.raw_data.push(Array(cols).fill(''));
+          tabs[tableIdx] = t; setCurrent(c => ({ ...c, tables: tabs }));
+        };
+        const updateHeader = (tableIdx, colIdx, value) => {
+          const tabs = (current.tables || []).map(t => ({ ...t }));
+          const t = tabs[tableIdx]; if (!t) return;
+          t.headers = t.headers || Array(t.columns || (t.raw_data[0]||[]).length).fill('');
+          t.headers[colIdx] = value;
+          tabs[tableIdx] = t; setCurrent(c => ({ ...c, tables: tabs }));
+        };
+        const removeTable = (tableIdx) => {
+          const tabs = (current.tables || []).slice(); tabs.splice(tableIdx,1);
+          setCurrent(c => ({ ...c, tables: tabs }));
+        };
+
+        const downloadModified = () => {
+          downloadBlob(JSON.stringify(current, null, 2), (current.metadata && current.metadata.filename ? current.metadata.filename : 'modified') + '_modified.json');
+        };
+
+        return (
+          <div>
+            <h4 style={{ marginTop: 0 }}>Structured Result (Editable)</h4>
+
+            <div style={{ marginTop: 8 }}>
+              <strong>Key / Value Pairs</strong>
+              <div style={{ marginTop: 8 }}>
+                {(current.key_value_pairs || []).map((kv, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                    <input value={kv.key || ''} onChange={e => updateKV(i, 'key', e.target.value)} placeholder="label" style={{ width: 240, padding: 6 }} />
+                    <input value={kv.value || ''} onChange={e => updateKV(i, 'value', e.target.value)} placeholder="value" style={{ flex: 1, padding: 6 }} />
+                    <button onClick={() => removeKV(i)} style={{ ...btnStyle, background: '#b33' }}>Remove</button>
+                  </div>
+                ))}
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={addKV} style={btnStyle}>Add field</button>
+                </div>
+              </div>
             </div>
 
-            <div style={{ background: '#111a2c', padding: 16, borderRadius: 12 }}>
-              <h3 style={{ marginTop: 0, marginBottom: 4 }}>Email Processing (IMAP)</h3>
-              <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 8 }}>Fetch recent attachments from your mailbox. Use app passwords where required.</div>
-              <label style={{ display: 'block', marginBottom: 6 }}>Email Provider</label>
-              <select value={provider} onChange={e => setProvider(e.target.value)} style={{ width: '100%', marginBottom: 8 }}>
-                <option>Auto Detect</option>
-                <option>Gmail</option>
-                <option>Outlook</option>
-                <option>Yahoo</option>
-                <option>iCloud</option>
-                <option>AOL</option>
-                <option>Custom</option>
-              </select>
+            <div style={{ marginTop: 12 }}>
+              <strong>Tables</strong>
+              <div style={{ marginTop: 8 }}>
+                {(current.tables || []).map((t, ti) => (
+                  <div key={ti} style={{ marginBottom: 12, padding: 8, border: '1px solid #223257', borderRadius: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div><strong>Table {t.table_number || ti+1}</strong> — page: {t.page ?? 'n/a'} — rows: {t.total_rows ?? 'n/a'}</div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => removeTable(ti)} style={{ ...btnStyle, background: '#b33' }}>Delete Table</button>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        {(t.headers || Array(t.columns || 0).fill('')).map((h, ci) => (
+                          <input key={ci} value={h || ''} onChange={e => updateHeader(ti, ci, e.target.value)} placeholder={`col ${ci+1}`} style={{ padding: 6, minWidth: 120 }} />
+                        ))}
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <TableEditor table={t} tableIdx={ti} onCellChange={updateTableCell} onRemoveRow={removeTableRow} onAddRow={addTableRow} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+              <button onClick={downloadModified} style={btnStyle}>Download Modified JSON</button>
+              <button onClick={() => downloadBlob(JSON.stringify(current, null, 2), 'structured_preview.json')} style={btnStyle}>Download Preview JSON</button>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <details>
+                <summary>Formatted JSON</summary>
+                <pre style={{ ...preStyle, maxHeight: 480, overflow: 'auto' }}>{JSON.stringify(current, null, 2)}</pre>
+              </details>
+            </div>
+          </div>
+        );
+      }
+
+      function TableEditor({ table, tableIdx, onCellChange, onRemoveRow, onAddRow }) {
+        const headers = table.headers || Array(table.columns || 0).fill('');
+        const rows = table.raw_data || [];
+        return (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ overflow: 'auto', border: '1px solid #223257', borderRadius: 6 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    {headers.map((h, hi) => (
+                      <th key={hi} style={{ textAlign: 'left', padding: '6px 8px', borderBottom: '1px solid #223257' }}>{h}</th>
+                    ))}
+                    <th style={{ padding: '6px 8px', borderBottom: '1px solid #223257' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, ri) => (
+                    <tr key={ri}>
+                      {headers.map((_, ci) => (
+                        <td key={ci} style={{ padding: '6px 8px', borderBottom: '1px solid #1a2340' }}>
+                          <input value={r[ci] ?? ''} onChange={e => onCellChange(tableIdx, ri, ci, e.target.value)} style={{ width: '100%', padding: 6 }} />
+                        </td>
+                      ))}
+                      <td style={{ padding: '6px 8px', borderBottom: '1px solid #1a2340' }}>
+                        <button onClick={() => onRemoveRow(tableIdx, ri)} style={{ ...btnStyle, background: '#b33' }}>Remove</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <button onClick={() => onAddRow(tableIdx)} style={btnStyle}>Add Row</button>
+            </div>
+          </div>
+        );
+      }
               <label style={{ display: 'block', marginBottom: 6 }}>Email</label>
               <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" style={{ width: '100%', marginBottom: 8 }} />
               <label style={{ display: 'block', marginBottom: 6 }}>Password / App Password</label>
