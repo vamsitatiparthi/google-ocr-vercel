@@ -1,5 +1,25 @@
 import { useMemo, useState, useEffect } from 'react';
 
+function IconTrash({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 6h18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 6v12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 11v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14 11v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 6V4h6v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconButton({ onClick, title, color = '#e06c6c', children }) {
+  return (
+    <button title={title} onClick={onClick} style={{ border: 'none', background: 'transparent', padding: 6, borderRadius: 6, cursor: 'pointer', color }}>
+      {children || <IconTrash />}
+    </button>
+  );
+}
+
 export default function Home() {
   const [files, setFiles] = useState([]);
   const [results, setResults] = useState([]);
@@ -336,6 +356,8 @@ function EditableJsonEditor({ value, onChange }) {
 }
 
 function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
+  // showDelete is optional prop; default true
+  const showDelete = arguments[0].showDelete !== undefined ? arguments[0].showDelete : true;
   const [expanded, setExpanded] = useState(true);
 
   // Primitive
@@ -347,7 +369,7 @@ function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
           const v = parsePrimitive(e.target.value);
           onUpdate(path, v);
         }} />
-        <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete</button>
+        {showDelete && <IconButton title="Delete" onClick={() => onRemove(path)} color="#b84b4b" />}
       </div>
     );
   }
@@ -360,7 +382,7 @@ function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
           <div>Array[{node.length}]</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => onAdd(path, null, '')} style={btnStyle}>Add item</button>
-            <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete Array</button>
+            <IconButton title="Delete array" onClick={() => onRemove(path)} color="#b84b4b" />
           </div>
         </div>
         <div style={{ marginTop: 8, paddingLeft: 8, display: 'grid', gap: 8 }}>
@@ -383,28 +405,36 @@ function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
         <div>{expanded ? 'Object' : 'Object (collapsed)'} — {entries.length} keys</div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={() => setExpanded(e => !e)} style={btnStyle}>{expanded ? 'Collapse' : 'Expand'}</button>
-          <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete Object</button>
+          <IconButton title="Delete object" onClick={() => onRemove(path)} color="#b84b4b" />
         </div>
       </div>
       {expanded && (
         <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
-          {entries.map((k, i) => (
-            <div key={k} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 120px', gap: 8, alignItems: 'center' }}>
-              <input value={k} onChange={e => {
-                const newKey = e.target.value || 'unnamed';
-                if (newKey === k) return; // no-op
-                onRename(path, k, newKey);
-              }} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+          {entries.map((k, i) => {
+            const child = node[k];
+            // Special-case compact key/value objects: { key: 'Label', value: 'V' }
+            const isKeyValue = child && typeof child === 'object' && !Array.isArray(child) && ('key' in child) && ('value' in child) && Object.keys(child).length <= 2;
+            return (
+              <div key={k} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 120px', gap: 8, alignItems: 'center' }}>
+                <input value={k} onChange={e => { const newKey = e.target.value || 'unnamed'; if (newKey === k) return; onRename(path, k, newKey); }} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
 
-              <div>
-                <JsonNode node={node[k]} path={[...path, k]} onUpdate={onUpdate} onRemove={onRemove} onAdd={onAdd} />
-              </div>
+                <div>
+                  {isKeyValue ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                      <input value={String(child.key || '')} onChange={e => onUpdate([...path, k, 'key'], e.target.value)} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+                      <input value={String(child.value ?? '')} onChange={e => onUpdate([...path, k, 'value'], parsePrimitive(e.target.value))} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+                    </div>
+                  ) : (
+                    <JsonNode node={node[k]} path={[...path, k]} onUpdate={onUpdate} onRemove={onRemove} onAdd={onAdd} showDelete={false} />
+                  )}
+                </div>
 
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => onRemove([...path, k])} style={{ ...btnStyle, background: '#b84b4b' }}>Delete</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <IconButton title="Delete field" onClick={() => onRemove([...path, k])} color="#b84b4b" />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           <AddField areaPath={path} onAdd={onAdd} />
         </div>
