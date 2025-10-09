@@ -116,7 +116,7 @@ export default function Home() {
                 <div style={{ background: '#0e1729', borderRadius: 8, padding: 8, overflow: 'auto', maxHeight: 680 }}>
                   <ResultList results={results} selected={selected} onSelect={setSelected} grouped={groupedView} />
                 </div>
-                <ResultPreview result={results[selected]} />
+                <ResultPreview result={results[selected]} allResults={results} />
               </div>
             )}
           </div>
@@ -203,7 +203,7 @@ function ResultListItem({ r, idx, selected, onSelect, bold }) {
   );
 }
 
-function ResultPreview({ result }) {
+function ResultPreview({ result, allResults = [] }) {
   const content = useMemo(() => {
     if (!result) return { text: '', json: null };
     // New API uses `content` for JSON artifacts; fall back to `text` for backwards compatibility
@@ -239,6 +239,13 @@ function ResultPreview({ result }) {
     URL.revokeObjectURL(url);
   };
 
+  // Find a sibling extracted-text artifact for this file (e.g. name_extracted.txt)
+  const extractedSibling = useMemo(() => {
+    if (!result || !result.filename) return null;
+    const base = baseName(result.filename || '');
+    return (allResults || []).find(r => r && r.type === 'extracted-text' && baseName(r.filename || '') === base) || null;
+  }, [result, allResults]);
+
   if (!result) return null;
   return (
     <div style={{ background: '#0e1729', borderRadius: 8, padding: 12, minHeight: 320 }}>
@@ -251,6 +258,9 @@ function ResultPreview({ result }) {
           <button onClick={copyToClipboard} style={btnStyle}>Copy</button>
           <button onClick={() => downloadAs('txt')} style={btnStyle}>Download .txt</button>
           {content.json && <button onClick={() => downloadAs('json')} style={btnStyle}>Download .json</button>}
+          {extractedSibling && (
+            <button onClick={() => downloadBlob(extractedSibling.content || '', extractedSibling.filename || 'extracted.txt')} style={btnStyle}>Download extracted .txt</button>
+          )}
         </div>
       </div>
 
