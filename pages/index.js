@@ -237,7 +237,7 @@ function ResultPreview({ result }) {
       {result.error ? (
         <div style={{ color: '#ff8080' }}>{result.error}</div>
       ) : content.json ? (
-        <RichJsonView json={content.json} type={result.type} />
+        <EditableJsonView initialJson={content.json} type={result.type} filename={result.filename} />
       ) : (
         <pre style={preStyle}>{content.text?.slice(0, 200000) || ''}</pre>
       )}
@@ -245,85 +245,194 @@ function ResultPreview({ result }) {
   );
 }
 
-function RichJsonView({ json }) {
-  // We only display the new structured JSON shape
-  const items = json.items || [];
-  const kv = json.key_value_pairs || [];
-  const parsing = json.parsing_options || {};
-  const validation = json.validation || { valid: true, warnings: [] };
-  const [remap, setRemap] = useState(null);
-  const [lastAppliedRemap, setLastAppliedRemap] = useState(null);
+function EditableJsonView({ initialJson, type, filename }) {
+  const [edited, setEdited] = useState(() => JSON.parse(JSON.stringify(initialJson || {})));
+  useEffect(() => setEdited(JSON.parse(JSON.stringify(initialJson || {}))), [initialJson]);
 
-  // If parsing suggests column roles, allow user to remap columns
-  const colRoles = (parsing.suggestions && parsing.suggestions[0] && parsing.suggestions[0].column_roles) || null;
-  const headers = json.parsing_options && json.parsing_options.detected_table_type === 'education' ? ['qualification','school','cgpa','year'] : null;
+  const applyChange = (newVal) => setEdited(newVal);
 
-  const applyRemap = (map) => {
-    setRemap(map);
-    setLastAppliedRemap(map);
+  const downloadEdited = () => {
+    const name = (filename || 'structured') + '_edited.json';
+    downloadBlob(JSON.stringify(edited, null, 2), name);
   };
-
-  // Remapped rows for preview
-  const remappedRows = useMemo(() => {
-    if (!remap || !Array.isArray(items)) return items;
-    // remap each item based on user mapping (map: target->source index)
-    return items.map(it => {
-      const out = {};
-      Object.keys(remap).forEach(k => {
-        const src = remap[k];
-        out[k] = Array.isArray(it) ? (it[src] || '') : (it[k] || it[Object.keys(it)[src]] || '');
-      });
-      return out;
-    });
-  }, [remap, items]);
 
   return (
     <div>
-      <h4 style={{ marginTop: 0 }}>Structured Result</h4>
-      <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr', gap: 8 }}>
-        {kv.map(kvItem => (
-          <>
-            <div style={{ opacity: 0.8 }}>{kvItem.key}</div>
-            <div>{String(kvItem.value)}</div>
-          </>
-        ))}
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <strong>Parsing Options</strong>
-        <div style={{ opacity: 0.8, marginTop: 6 }}>{JSON.stringify(parsing, null, 2)}</div>
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <strong>Validation</strong>
-        <div style={{ color: validation.valid ? '#8fd19e' : '#ffb3b3' }}>{validation.valid ? 'OK' : 'Warnings'}</div>
-        {!validation.valid && <pre style={preStyle}>{JSON.stringify(validation.warnings, null, 2)}</pre>}
-      </div>
-
-      {colRoles && (
-        <div style={{ marginTop: 12 }}>
-          <h4>Column Mapper (suggested)</h4>
-          <div style={{ opacity: 0.8 }}>Detected roles: {colRoles.join(', ')}</div>
-          <ColumnMapper roles={colRoles} onApply={applyRemap} detectedType={parsing.detected_table_type} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h4 style={{ margin: 0 }}>Structured Result (Editable)</h4>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={downloadEdited} style={btnStyle}>Download Edited JSON</button>
+          <button onClick={() => { setEdited(JSON.parse(JSON.stringify(initialJson || {}))); }} style={{ ...btnStyle, background: '#666' }}>Reset</button>
         </div>
-      )}
+      </div>
 
-      {Array.isArray(remappedRows) && remappedRows.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <h4>Items (preview)</h4>
-          <TableView headers={headers || Object.keys(remappedRows[0] || {})} rows={remappedRows} />
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-            <button onClick={() => exportRemapped(json, lastAppliedRemap)} style={btnStyle}>Export Remapped .json</button>
-          </div>
-        </div>
-      )}
+      <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
+        <EditableJsonEditor value={edited} onChange={applyChange} />
+      </div>
 
       <details style={{ marginTop: 12 }}>
         <summary>Raw JSON</summary>
-        <pre style={preStyle}>{JSON.stringify(json, null, 2)}</pre>
+        <pre style={preStyle}>{JSON.stringify(edited, null, 2)}</pre>
       </details>
     </div>
   );
+}
+
+function EditableJsonEditor({ value, onChange }) {
+  // value is an object/array/primitive
+  const update = (path, newVal) => {
+    const clone = JSON.parse(JSON.stringify(value));
+    const parts = path.slice();
+    let cur = clone;
+    for (let i = 0; i < parts.length - 1; i++) {
+      cur = cur[parts[i]];
+    }
+    const last = parts[parts.length - 1];
+    cur[last] = newVal;
+    onChange(clone);
+  };
+
+  const remove = (path) => {
+    const clone = JSON.parse(JSON.stringify(value));
+    const parts = path.slice();
+    let cur = clone;
+    for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+    const last = parts[parts.length - 1];
+    if (Array.isArray(cur)) cur.splice(last, 1);
+    else delete cur[last];
+    onChange(clone);
+  };
+
+  const addField = (path, key, val) => {
+    const clone = JSON.parse(JSON.stringify(value));
+    let cur = clone;
+    for (let i = 0; i < path.length; i++) cur = cur[path[i]];
+    if (Array.isArray(cur)) cur.push(val);
+    else cur[key] = val;
+    onChange(clone);
+  };
+
+  const renameKey = (path, fromKey, toKey) => {
+    const clone = JSON.parse(JSON.stringify(value));
+    // navigate to parent object
+    let parent = clone;
+    for (let i = 0; i < path.length; i++) parent = parent[path[i]];
+    if (!parent || typeof parent !== 'object' || Array.isArray(parent)) return;
+    // avoid overwriting existing key
+    if (toKey in parent && toKey !== fromKey) {
+      alert('Key already exists: ' + toKey);
+      return;
+    }
+    parent[toKey] = parent[fromKey];
+    delete parent[fromKey];
+    onChange(clone);
+  };
+
+  return (
+    <div style={{ background: '#081126', padding: 12, borderRadius: 8 }}>
+      <JsonNode node={value} path={[]} onUpdate={update} onRemove={remove} onAdd={addField} onRename={renameKey} />
+    </div>
+  );
+}
+
+function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
+  const [expanded, setExpanded] = useState(true);
+
+  // Primitive
+  if (node === null || typeof node !== 'object') {
+    const str = node === null ? 'null' : String(node);
+    return (
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input style={{ flex: 1, padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} value={str} onChange={e => {
+          const v = parsePrimitive(e.target.value);
+          onUpdate(path, v);
+        }} />
+        <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete</button>
+      </div>
+    );
+  }
+
+  // Array
+  if (Array.isArray(node)) {
+    return (
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>Array[{node.length}]</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => onAdd(path, null, '')} style={btnStyle}>Add item</button>
+            <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete Array</button>
+          </div>
+        </div>
+        <div style={{ marginTop: 8, paddingLeft: 8, display: 'grid', gap: 8 }}>
+          {node.map((it, idx) => (
+            <div key={idx} style={{ padding: 8, border: '1px solid #223257', borderRadius: 6 }}>
+              <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>[{idx}]</div>
+              <JsonNode node={it} path={[...path, idx]} onUpdate={onUpdate} onRemove={onRemove} onAdd={onAdd} />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Object
+  const entries = Object.keys(node || {});
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>{expanded ? 'Object' : 'Object (collapsed)'} — {entries.length} keys</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setExpanded(e => !e)} style={btnStyle}>{expanded ? 'Collapse' : 'Expand'}</button>
+          <button onClick={() => onRemove(path)} style={{ ...btnStyle, background: '#b84b4b' }}>Delete Object</button>
+        </div>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+          {entries.map((k, i) => (
+            <div key={k} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 120px', gap: 8, alignItems: 'center' }}>
+              <input value={k} onChange={e => {
+                const newKey = e.target.value || 'unnamed';
+                if (newKey === k) return; // no-op
+                onRename(path, k, newKey);
+              }} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+
+              <div>
+                <JsonNode node={node[k]} path={[...path, k]} onUpdate={onUpdate} onRemove={onRemove} onAdd={onAdd} />
+              </div>
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => onRemove([...path, k])} style={{ ...btnStyle, background: '#b84b4b' }}>Delete</button>
+              </div>
+            </div>
+          ))}
+
+          <AddField areaPath={path} onAdd={onAdd} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddField({ areaPath, onAdd }) {
+  const [key, setKey] = useState('');
+  const [val, setVal] = useState('');
+  return (
+    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+      <input placeholder="new key" value={key} onChange={e=>setKey(e.target.value)} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+      <input placeholder="value" value={val} onChange={e=>setVal(e.target.value)} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc', flex: 1 }} />
+      <button onClick={() => { if (!key) return alert('Please enter a key'); onAdd(areaPath, key, parsePrimitive(val)); setKey(''); setVal(''); }} style={btnStyle}>Add</button>
+    </div>
+  );
+}
+
+function parsePrimitive(s) {
+  if (s === 'null') return null;
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (s === '') return '';
+  const n = Number(s);
+  if (!Number.isNaN(n) && String(n) === s) return n;
+  return s;
 }
 
 function ColumnMapper({ roles, detectedType, onApply }) {
