@@ -376,6 +376,33 @@ function JsonNode({ node, path, onUpdate, onRemove, onAdd }) {
 
   // Array
   if (Array.isArray(node)) {
+    // Special-case arrays of key/value pairs: [{key:'k', value:'v'}, ...]
+    const isKvArray = node.length > 0 && node.every(it => it && typeof it === 'object' && !Array.isArray(it) && ('key' in it) && ('value' in it));
+    if (isKvArray) {
+      return (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>Key/Value Pairs [{node.length}]</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => onAdd(path, null, { key: '', value: '' })} style={btnStyle}>Add</button>
+              <IconButton title="Delete array" onClick={() => onRemove(path)} color="#b84b4b" />
+            </div>
+          </div>
+          <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+            {node.map((it, idx) => (
+              <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 56px', gap: 8, alignItems: 'center', padding: 8, border: '1px solid #223257', borderRadius: 6 }}>
+                <input value={String(it.key ?? '')} onChange={e => onUpdate([...path, idx, 'key'], e.target.value)} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+                <input value={String(it.value ?? '')} onChange={e => onUpdate([...path, idx, 'value'], parsePrimitive(e.target.value))} style={{ padding: 6, borderRadius: 6, border: '1px solid #223257', background: 'transparent', color: '#e6eefc' }} />
+                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                  <IconButton title="Delete" onClick={() => onRemove([...path, idx])} color="#b84b4b" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
