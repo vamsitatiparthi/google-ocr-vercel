@@ -1,5 +1,7 @@
 import { useMemo, useState, useEffect } from 'react';
 
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4001';
+
 function IconTrash({ size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -41,11 +43,20 @@ export default function Home() {
     if (!files.length) { setUploadError('Please select at least one file'); return; }
     setLoading(true);
     try {
-      const form = new FormData(); files.forEach(f => form.append('files', f));
-      const res = await fetch('/api/ocr', { method: 'POST', body: form });
+      const form = new FormData();
+      // backend expects single file field name 'file'; process first file for parity
+      form.append('file', files[0]);
+      const res = await fetch(`${API_BASE}/ocr`, { method: 'POST', body: form });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setResults(data.results || []);
+      // Normalize into current UI result format
+      const out = [];
+      if (data) {
+        const filename = files[0]?.name || 'uploaded';
+        out.push({ filename, type: 'Raw', content: data.rawText || '' });
+        if (data.structuredJSON) out.push({ filename: filename.replace(/\.[^.]+$/, '') + '.json', type: 'JSON', content: JSON.stringify(data.structuredJSON, null, 2) });
+      }
+      setResults(out);
       setSelected(0);
     } catch (e) {
       setUploadError(e.message || 'Upload failed');
@@ -58,10 +69,21 @@ export default function Home() {
       if (!email || !password) throw new Error('Please enter Email and Password / App Password');
       if (!String(email).includes('@')) throw new Error('Please enter a valid email address');
       const d = Number(days) || 1; if (d < 1) throw new Error('Days Back must be at least 1');
-      const body = { provider, email, password, days: d };
-      const res = await fetch('/api/email-ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const normalizedProvider = provider && provider.toLowerCase().includes('auto') ? undefined : provider.toLowerCase();
+      const body = { email, password, daysBack: d };
+      if (normalizedProvider) body.provider = normalizedProvider;
+      const res = await fetch(`${API_BASE}/email/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json(); setResults(data.results || []); setSelected(0);
+      const data = await res.json();
+      // backend returns { attachments: [...] }
+      const atts = data.attachments || [];
+      const out = [];
+      for (const a of atts) {
+        out.push({ filename: a.filename || 'attachment', type: 'Raw', content: a.rawText || '' });
+        if (a.structuredJSON) out.push({ filename: (a.filename || 'attachment') + '.json', type: 'JSON', content: JSON.stringify(a.structuredJSON, null, 2) });
+      }
+      setResults(out);
+      setSelected(0);
     } catch (e) { setEmailError(e.message || 'Email processing failed'); }
     finally { setLoading(false); }
   };
